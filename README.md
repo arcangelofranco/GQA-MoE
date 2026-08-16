@@ -251,10 +251,8 @@ Once upon a time, there was a little girl named Lily. She loved to play outside 
 In the full forward pass, the input token sequence is first projected into the residual stream through the embedding and then processed sequentially by the $N$ `TransformerBlock`s. Each block applies its own GQA and the corresponding MoE layer in a pre-norm configuration, keeping a residual connection around each of the two components. At the output of the last block, the state is normalized via a final RMSNorm and then projected into the vocabulary space by the linear LM head (`hidden_dim -> vocab_size`), whose weights are shared with those of the input embedding. The result is the logits vector, used during training to compute the cross-entropy and, during generation, to determine the next token via sampling.
 
 <div align="center">
-    <picture>
-        <img alt="Full forward pass: embedding, N transformer blocks (pre-norm GQA + pre-norm MoE), final RMSNorm, linear LM head" src="docs/diagrams/model_overview.svg">
-    </picture>
-    <figcaption>Fig. 1 - Full forward pass: embedding, N transformer blocks (pre-norm GQA + pre-norm MoE), final RMSNorm, linear LM head</figcaption>
+    <img alt="Full forward pass: embedding, N transformer blocks (pre-norm GQA + pre-norm MoE), final RMSNorm, linear LM head" src="docs/diagrams/model_overview.svg">
+    <p><em>Fig. 1 - Full forward pass: embedding, N transformer blocks (pre-norm GQA + pre-norm MoE), final RMSNorm, linear LM head</em></p>
 </div>
 
 ### GQAttention
@@ -263,10 +261,8 @@ Within each block, the normalized input is projected into query, key, and value.
 RoPE is then applied, rotating the component pairs of query and key as a function of position in the sequence. During incremental generation, the position also accounts for the length already present in the KV cache, so as to preserve the correct relative position of new tokens. At inference time, the newly computed keys and values are appended to the layer's KV cache, after which the KV heads are replicated, or broadcast, up to `n_heads`, allowing causal scaled dot-product attention to be performed between all query heads and their respective KV heads. The head outputs are then concatenated and projected back into the residual stream through the output projection `Wo`.
 
 <div align="center">
-    <picture>
-        <img alt="GQAttention: Q/K/V projections, QK-Norm, RoPE, KV cache, head broadcast, scaled dot-product attention" src="docs/diagrams/gqaattention.svg">
-    </picture>
-    <figcaption>Fig. 2 - GQAttention: Q/K/V projections, QK-Norm, RoPE, KV cache, head broadcast, scaled dot-product attention</figcaption>
+    <img alt="GQAttention: Q/K/V projections, QK-Norm, RoPE, KV cache, head broadcast, scaled dot-product attention" src="docs/diagrams/gqaattention.svg">
+    <p><em>Fig. 2 - GQAttention: Q/K/V projections, QK-Norm, RoPE, KV cache, head broadcast, scaled dot-product attention</em></p>
 </div>
 
 ### MoE Routing
@@ -275,29 +271,25 @@ The feed-forward layer of each block is implemented as a Mixture-of-Experts (MoE
 In parallel, a shared expert, always active and independent of routing, processes every token, and its output is added to that produced by the selected experts. This mechanism maintains shared capacity across all tokens, regardless of the router's decisions. During training, an auxiliary load-balancing loss is also computed, which penalizes overly unbalanced routing distributions and encourages the router to use the experts more uniformly.
 
 <div align="center">
-    <picture>
-        <img alt="MoE routing: per-token top-k expert selection plus an always-on shared expert" src="docs/diagrams/moe_routing.svg">
-    </picture>
-    <figcaption>Fig. 3 - MoE routing: per-token top-k expert selection plus an always-on shared expert</figcaption>
+    <img alt="MoE routing: per-token top-k expert selection plus an always-on shared expert" src="docs/diagrams/moe_routing.svg">
+    <p><em>Fig. 3 - MoE routing: per-token top-k expert selection plus an always-on shared expert</em></p>
 </div>
 
 ### Feed-forward SwiGLU
 Each expert, whether routed or shared, internally uses a SwiGLU variant, in which the input is processed in parallel by two independent linear projections, `gate_proj` and `up_proj`, both mapping to the same intermediate dimension. The output of `gate_proj` passes through the SiLU activation and is then multiplied element-wise by the output of `up_proj`, introducing a gating mechanism that lets the network dynamically modulate how much information passes through each intermediate unit. The result is finally projected back to the original `hidden_dim` via `down_proj`. Compared to classic two-layer FFNs based on ReLU or GELU, this gated variant generally offers a more expressive representation and, for the same parameter budget, can deliver better performance.
 
 <div align="center">
-    <picture>
-        <img alt="SwiGLU feed-forward: gate_proj + SiLU, up_proj, elementwise multiply, down_proj" src="docs/diagrams/ffn_swiglu.svg">
-    </picture>
-    <figcaption>Fig. 4 - SwiGLU feed-forward: gate_proj + SiLU, up_proj, elementwise multiply, down_proj</figcaption>
+    <img alt="SwiGLU feed-forward: gate_proj + SiLU, up_proj, elementwise multiply, down_proj" src="docs/diagrams/ffn_swiglu.svg">
+    <p><em>Fig. 4 - SwiGLU feed-forward: gate_proj + SiLU, up_proj, elementwise multiply, down_proj</em></p>
 </div>
 
 ### Tensor Shape reference
 
-<div style="display: flex; gap: 2rem; align-items: flex-start;">
+<table>
+<tr>
+<td valign="top">
 
-<div>
-
-| Legend |  |
+| Legend | |
 | :--- | :--- |
 | B | batch size |
 | S | seq len |
@@ -308,29 +300,28 @@ Each expert, whether routed or shared, internally uses a SwiGLU variant, in whic
 | I | intermediate size |
 | E | num experts |
 
-</div>
-
-<div>
+</td>
+<td valign="top">
 
 | Stage | OP | Shape |
 | :--- | :--- | :--- |
-| Embedding | lookup | $[B, S]$ &#8594; $[B, S, H]$ |
-| $Q$ proj & reshape | $[B, S, H]$@$[H, Nh \cdot D]$ | &#8594; $[B, Nh, S, D]$ |
-| $K$ / $V$ proj & reshape | $[B, S, H]$@$[H, Nkv \cdot D]$ | &#8594; $[B, Nkv, S, D]$ |
-| Attention scores | $Q \cdot K^{T}/\sqrt{D}$ | $[B, Nh, S, S]$ |
-| Context vectors | softmax $\cdot$ V (kv broadcast) | $[B, Nh, S, D]$ |
-| Concat heads | reshape | $[B, S, Nh \cdot D] = [B, S, H]$ |
-| Output proj (Wo) | $[B, S, H]$@$[H, H]$ | &#8594; $[B, S, H]$ |
-| Router logits | $[B, S, H]$@$[H, E]$ | &#8594; $[B, S, E]$ |
-| Top-K selection | select K of E, renormalize | $[B, S, K]$ |
-| Expert gate/up proj | $[\dots, H]$@$[H, I]$ | &#8594; $[\dots, I]$ |
-| Expert down proj | $[\dots, I]$@$[I, H]$ | &#8594; $[\dots, H]$ |
-| MoE combined output | routed_sum + shared_expert(x) | $[B, S, H]$ |
-| LM Head projection | $[B, S, H]$@$[H, V]$ | &#8594; $[B, S, V]$ |
+| Embedding | lookup | $[B, S]$ → $[B, S, H]$ |
+| $Q$ proj & reshape | $[B,S,H]$ @ $[H,N_hD]$ | → $[B,N_h,S,D]$ |
+| $K$ / $V$ proj & reshape | $[B,S,H]$ @ $[H,N_{kv}D]$ | → $[B,N_{kv},S,D]$ |
+| Attention scores | $QK^T/\sqrt{D}$ | $[B,N_h,S,S]$ |
+| Context vectors | softmax · V | $[B,N_h,S,D]$ |
+| Concat heads | reshape | $[B,S,H]$ |
+| Output proj | $[B,S,H]$ @ $[H,H]$ | → $[B,S,H]$ |
+| Router logits | $[B,S,H]$ @ $[H,E]$ | → $[B,S,E]$ |
+| Top-K selection | select K of E | $[B,S,K]$ |
+| Expert gate/up | $[\dots,H]$ @ $[H,I]$ | → $[\dots,I]$ |
+| Expert down | $[\dots,I]$ @ $[I,H]$ | → $[\dots,H]$ |
+| MoE output | routed + shared | $[B,S,H]$ |
+| LM Head | $[B,S,H]$ @ $[H,V]$ | → $[B,S,V]$ |
 
-</div>
-
-</div>
+</td>
+</tr>
+</table>
 
 ### Parameter Count
 
