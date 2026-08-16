@@ -1,0 +1,34 @@
+# SMALL preset: 155,339,264 parameters.
+
+model:
+  vocab_size: 16000
+  n_layers: 16
+  n_heads: 8
+  n_kv_heads: 4
+  head_dim: 64
+  expert_intermediate: 512
+  shared_intermediate: 1376
+  n_experts: 8
+  top_k: 2
+  max_seq_len: 2048
+  rms_norm_eps: 1.0e-6
+  rope_theta: 10000.0
+  aux_loss_coeff: 0.01
+  tie_embeddings: true
+
+train:
+  batch_size: 8
+  block_size: 1024
+  target_tokens: 1_500_000_000
+  warmup_steps: 500
+  max_lr: 3.0e-4
+  min_lr: 3.0e-5
+  weight_decay: 0.1
+  grad_clip: 1.0
+  eval_interval: 500
+  eval_iters: 50
+  seed: 1337
+
+runtime:
+  log_every: 10
+  checkpoint_every: 1000
