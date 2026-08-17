@@ -16,7 +16,10 @@ They played together all afternoon and became best friends.
 
 
 def _train_tiny_tokenizer(tmp_path: Path, vocab_size: int = 300) -> Path:
-    """Trains a tiny BPE tokenizer on the toy corpus for test fixtures.
+    """Trains a small BPE tokenizer on the toy corpus for test fixtures.
+
+    Wraps ``train_bpe`` to provide tokenizers of arbitrary size so each test
+    controls the vocabulary independently.
 
     Args:
         tmp_path: Temporary directory to write the corpus and tokenizer into.
@@ -34,6 +37,9 @@ def _train_tiny_tokenizer(tmp_path: Path, vocab_size: int = 300) -> Path:
 
 def _save_tiny_checkpoint(tmp_path: Path, vocab_size: int) -> tuple[Path, ModelConfig]:
     """Builds and saves a minimal Transformer checkpoint for test fixtures.
+
+    Uses a deterministic seed so generation tests stay reproducible and
+    returns the config so tests can assert vocab size compatibility.
 
     Args:
         tmp_path: Temporary directory to write the checkpoint into.
@@ -55,7 +61,10 @@ def _save_tiny_checkpoint(tmp_path: Path, vocab_size: int) -> tuple[Path, ModelC
 
 
 def test_cli_generate_end_to_end_smoke(tmp_path: Path) -> None:
-    """Checks that the generate CLI runs end-to-end and echoes the prompt prefix.
+    """Verifies the generate CLI runs end-to-end and returns text.
+
+    Confirms the output is a string that continues from the given prompt,
+    exercising checkpoint loading, tokenization, and sampling.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -79,7 +88,10 @@ def test_cli_generate_end_to_end_smoke(tmp_path: Path) -> None:
 
 
 def test_cli_generate_greedy_is_deterministic(tmp_path: Path) -> None:
-    """Checks that greedy decoding (temperature=0.0) produces identical output across runs.
+    """Verifies greedy decoding is deterministic across runs.
+
+    With ``temperature=0.0`` the same prompt and checkpoint must always yield
+    identical text, guarding against sampling nondeterminism or state leakage.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -103,7 +115,10 @@ def test_cli_generate_greedy_is_deterministic(tmp_path: Path) -> None:
 
 
 def test_cli_generate_rejects_vocab_size_mismatch(tmp_path: Path) -> None:
-    """Checks that a checkpoint/tokenizer vocab size mismatch raises ValueError.
+    """Verifies that a checkpoint/tokenizer vocab size mismatch raises ``ValueError``.
+
+    Generating with a tokenizer that cannot represent the model vocabulary
+    would produce invalid output, so the CLI must reject it upfront.
 
     Args:
         tmp_path: Pytest-provided temporary directory.

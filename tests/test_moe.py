@@ -18,15 +18,18 @@ CONFIGS = [NANO, SMALL]
 
 
 def _routed_indices(moe: MoELayer, x: torch.Tensor) -> list[int]:
-    """Computes the set of expert indices selected by the router for a batch.
+    """Returns the set of expert indices the router selects for a batch of tokens.
+
+    Helper used to inspect routing behaviour without depending on internal
+    implementation details of :class:`MoELayer`.
 
     Args:
-        moe: MoE layer whose router to query.
-        x: Input tensor to route.
+        moe: The MoE layer whose router is queried.
+        x: Input tensor to route, shaped ``(B, S, hidden_dim)``.
 
     Returns:
-        Sorted-by-value unique list of expert indices chosen across all
-        tokens' top-k selections.
+        Sorted list of unique expert indices chosen across all tokens'
+        top-k selections.
     """
     router_logits = moe.router(x.reshape(-1, x.shape[-1]))
     router_probs = F.softmax(router_logits, dim=-1, dtype=torch.float32)
@@ -38,7 +41,10 @@ def _routed_indices(moe: MoELayer, x: torch.Tensor) -> list[int]:
 @pytest.mark.parametrize("s", [1, 16, 512])
 @pytest.mark.parametrize("b", [1, 4])
 def test_shape(b: int, s: int, config: SimpleNamespace) -> None:
-    """Checks that MoELayer preserves shape and stays finite.
+    """Verifies that a forward pass preserves the input shape and produces finite outputs.
+
+    Guards the MoE routing and expert computation against shape corruption or
+    numerical blow-ups across a range of batch and sequence sizes.
 
     Args:
         b: Batch size.
@@ -58,7 +64,10 @@ def test_shape(b: int, s: int, config: SimpleNamespace) -> None:
 
 @pytest.mark.parametrize("config", CONFIGS, ids=["nano", "small"])
 def test_aux_loss_scalar_finite_nonneg(config: SimpleNamespace) -> None:
-    """Checks that the MoE aux loss is a finite, non-negative scalar.
+    """Verifies that the auxiliary load-balancing loss is a finite, non-negative scalar.
+
+    A scalar shape and non-negative value are required so the loss can be added
+    directly to the training objective.
 
     Args:
         config: Model config under test (nano or small).
@@ -78,7 +87,11 @@ def test_aux_loss_scalar_finite_nonneg(config: SimpleNamespace) -> None:
 
 @pytest.mark.parametrize("config", CONFIGS, ids=["nano", "small"])
 def test_expert_utilization(config: SimpleNamespace) -> None:
-    """Checks that routing over a large batch spreads selections across at least 2 experts.
+    """Verifies that routing a diverse batch engages more than one expert.
+
+    A working router should not collapse onto a single expert; spreading
+    selections is a prerequisite for the load-balancing behaviour the MoE
+    layer is meant to encourage.
 
     Args:
         config: Model config under test (nano or small).
@@ -94,7 +107,16 @@ def test_expert_utilization(config: SimpleNamespace) -> None:
 
 
 def test_moe_layer_does_not_depend_on_aux_loss_coeff() -> None:
-    """Checks that MoELayer works without an aux_loss_coeff field on the config or the layer."""
+    """Verifies that :class:`MoELayer` operates without an ``aux_loss_coeff`` field.
+
+    The coefficient is a training-time concern owned by the outer model, so the
+    layer itself must not require it. A forward pass must still run and produce
+    a valid auxiliary loss.
+
+    Raises:
+        AssertionError: If the config or layer exposes ``aux_loss_coeff`` or the
+            forward pass produces non-finite or negative auxiliary loss.
+    """
     config = SimpleNamespace(
         hidden_dim=64, n_experts=4, top_k=2, expert_intermediate=32, shared_intermediate=64,
     )
@@ -112,10 +134,18 @@ def test_moe_layer_does_not_depend_on_aux_loss_coeff() -> None:
 
 @pytest.mark.parametrize("config", CONFIGS, ids=["nano", "small"])
 def test_gradient_on_every_expert(config: SimpleNamespace) -> None:
-    """Checks that every expert (and the shared expert and router) receives a nonzero gradient.
+    """Verifies that backpropagation assigns nonzero gradients to every expert, the shared expert, and the router.
+
+    A dead expert (never receiving gradient) would silently waste capacity and
+    defeat the purpose of the architecture, so every routing path must be
+    reachable by the optimizer.
 
     Args:
         config: Model config under test (nano or small).
+
+    Raises:
+        AssertionError: If any expert has a zero or missing gradient, or the
+            router receives no gradient.
     """
     moe = MoELayer(config)
     moe.train()

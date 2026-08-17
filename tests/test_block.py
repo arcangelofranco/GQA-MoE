@@ -23,7 +23,11 @@ MAX_SEQ_LEN = 1024
 @pytest.mark.parametrize("s", [1, 16, 512])
 @pytest.mark.parametrize("b", [1, 4])
 def test_shape(b: int, s: int, config: SimpleNamespace) -> None:
-    """Checks that TransformerBlock preserves shape and stays finite.
+    """Verify that TransformerBlock preserves shape and stays finite.
+
+    Guards the residual-stream contract of the block across both configs and a
+    sweep of batch/sequence sizes, including the single-token case used in
+    incremental decoding.
 
     Args:
         b: Batch size.
@@ -44,7 +48,11 @@ def test_shape(b: int, s: int, config: SimpleNamespace) -> None:
 
 @pytest.mark.parametrize("config", CONFIGS, ids=["nano", "small"])
 def test_aux_loss_propagated(config: SimpleNamespace) -> None:
-    """Checks that the block's MoE aux loss is a finite, non-negative scalar.
+    """Verify that the block's MoE aux loss is a finite, non-negative scalar.
+
+    In train mode the load-balancing loss must flow out of the block as a
+    scalar suitable for addition into the total training loss; a non-finite or
+    negative value here would silently corrupt the optimization signal.
 
     Args:
         config: Model config under test (nano or small).
@@ -65,7 +73,11 @@ def test_aux_loss_propagated(config: SimpleNamespace) -> None:
 
 @pytest.mark.parametrize("config", CONFIGS, ids=["nano", "small"])
 def test_kv_cache_grows(config: SimpleNamespace) -> None:
-    """Checks that the KV cache grows by one position per incremental decoding step.
+    """Verify that the KV cache grows by one position per decoding step.
+
+    Each incremental call appends exactly one key/value position, so the cache
+    length must equal the number of steps taken. This pins the append contract
+    that generation relies on for correct positional addressing.
 
     Args:
         config: Model config under test (nano or small).
@@ -91,7 +103,11 @@ def test_kv_cache_grows(config: SimpleNamespace) -> None:
 @pytest.mark.parametrize("config", CONFIGS, ids=["nano", "small"])
 @pytest.mark.parametrize("s", [16, 64])
 def test_kv_cache_equivalence(config: SimpleNamespace, s: int) -> None:
-    """Checks that step-by-step KV-cache decoding matches a full forward pass.
+    """Verify that incremental KV-cache decoding matches a full forward pass.
+
+    Compares the block's single-pass output against the concatenation of
+    step-by-step cached calls on the same input. This is the end-to-end
+    invariance that guarantees caching never changes the block's behavior.
 
     Args:
         config: Model config under test (nano or small).

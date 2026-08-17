@@ -14,7 +14,7 @@ HIDDEN_DIMS = [256, 512]
 @pytest.mark.parametrize("s", S_LENS)
 @pytest.mark.parametrize("dim", HIDDEN_DIMS)
 def test_shape(b: int, s: int, dim: int) -> None:
-    """Checks that RMSNorm preserves the input shape.
+    """Verifies that RMSNorm preserves the input shape.
 
     Args:
         b: Batch size.
@@ -32,7 +32,10 @@ def test_shape(b: int, s: int, dim: int) -> None:
 @pytest.mark.parametrize("b", B_SIZES)
 @pytest.mark.parametrize("s", S_LENS)
 def test_l2_norm_is_sqrt_dim(b: int, s: int, dim: int) -> None:
-    """Checks that unit-weight RMSNorm rescales each vector's L2 norm to sqrt(dim).
+    """Verifies that a unit weight rescales each vector's L2 norm to ``sqrt(dim)``.
+
+    With default initialization the normalized output must have a fixed norm
+    independent of the input scale, which is the key property of RMSNorm.
 
     Args:
         b: Batch size.
@@ -54,9 +57,10 @@ def test_l2_norm_is_sqrt_dim(b: int, s: int, dim: int) -> None:
 
 
 def test_weight_participates() -> None:
-    """Checks that the learnable weight scales the normalized output proportionally.
+    """Verifies the learnable weight scales the normalized output proportionally.
 
-    Doubling `norm.weight` should double both the output and its norm.
+    Doubling ``norm.weight`` must double both the output and its norm,
+    confirming the parameter is wired into the forward pass and not ignored.
     """
     norm = RMSNorm(256)
     x = torch.randn(3, 5, 256)
@@ -77,7 +81,10 @@ def test_weight_participates() -> None:
 
 @pytest.mark.parametrize("dim", HIDDEN_DIMS)
 def test_stability_near_zero(dim: int) -> None:
-    """Checks that RMSNorm stays finite and nonzero for near-zero inputs.
+    """Verifies RMSNorm stays finite and nonzero for near-zero inputs.
+
+    The epsilon term in the denominator must prevent division by zero and
+    NaN/Inf propagation on degenerate inputs.
 
     Args:
         dim: Hidden dimension.
@@ -97,7 +104,7 @@ def test_stability_near_zero(dim: int) -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="bf16 not supported on CPU")
 @pytest.mark.parametrize("dim", HIDDEN_DIMS)
 def test_bf16_dtype_invariance(dim: int) -> None:
-    """Checks that RMSNorm preserves bf16 dtype and stays finite on CUDA.
+    """Verifies RMSNorm preserves bf16 dtype and stays finite on CUDA.
 
     Skipped when CUDA is unavailable, since bf16 is not supported on CPU here.
 

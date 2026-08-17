@@ -5,7 +5,7 @@ from src.runtime.sampler import SamplingPolicy
 
 
 def _peaked_logits(batch: int = 3, vocab: int = 20, seed: int = 0) -> torch.Tensor:
-    """Generates random logits for sampler tests.
+    """Generates random Gaussian logits for the sampler tests.
 
     Args:
         batch: Batch size.
@@ -20,7 +20,7 @@ def _peaked_logits(batch: int = 3, vocab: int = 20, seed: int = 0) -> torch.Tens
 
 
 def test_greedy_returns_argmax_and_ignores_top_k_top_p() -> None:
-    """Checks that temperature=0.0 always returns the argmax, ignoring top_k/top_p."""
+    """Checks that temperature=0.0 always returns the argmax, ignoring the ``top_k``/``top_p`` settings."""
     logits = _peaked_logits()
     expected = logits.argmax(dim=-1, keepdim=True)
 

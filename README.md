@@ -65,9 +65,10 @@ root/
 │   ├── data/                           # data handling, with no dependencies on model/
 │   │   ├── __init__.py
 │   │   ├── train_tokenizer.py          # BPE training: raw corpus -> vocab.json/merges.txt
-│   │   ├── prepare_data.py             # download, batching, encoding and memmap
+│   │   ├── prepare_data.py             # download, batching, streaming encoding to .bin
 │   │   ├── dataset.py                  # BinDataset and get_batch()
-│   │   └── tokenizer.py                # wrapper for BPE encode/decode
+│   │   ├── tokenizer.py                # wrapper for BPE encode/decode
+│   │   └── token_dtype.py              # vocab size -> uint16/uint32, shared by writer and reader
 │   │
 │   ├── runtime/                        # training and generation orchestration
 │   │   ├── __init__.py
@@ -94,6 +95,7 @@ root/
 │   ├── test_transformer.py             # full model, tied embeddings, initialization and end-to-end cache
 │   ├── test_data.py                    # tokenizer pipeline, memmap, get_batch and batching with mocked network
 │   ├── test_tokenizer.py               # BPE round-trip, special tokens and compression
+│   ├── test_token_dtype.py             # uint16/uint32 boundary and rejection of unknown dtypes
 │   ├── blocks/                         # mirror of src/model/blocks/
 │   │   ├── test_norm.py
 │   │   ├── test_rope.py

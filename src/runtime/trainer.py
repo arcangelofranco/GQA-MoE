@@ -12,7 +12,15 @@ from src.runtime.schedule import TrainingSchedule
 
 
 class Trainer:
-    """Owns the model, schedule, and training loop: steps, eval, checkpoints."""
+    """Owns the model, schedule, and training loop: steps, eval, checkpoints.
+
+    The central orchestration object of the training phase. It holds the
+    model and its :class:`TrainingSchedule`, drives the loop of batch
+    sampling, forward/backward, gradient update, periodic validation, metric
+    recording, and checkpointing. It also owns the checkpoint format: a dict
+    with model weights, schedule state, step count, RNG state, and the model
+    and training configs, so a run can be resumed exactly.
+    """
 
     def __init__(
         self,
@@ -25,11 +33,14 @@ class Trainer:
 
         Args:
             cfg: The run configuration. Its cross-config invariants were
-                already checked when it was built.
+                already checked when it was built (e.g. by the CLI or the
+                config layer).
             dataset: Dataset to sample train/val batches from.
-            run_dir: Directory for checkpoints; created if missing.
+            run_dir: Directory for checkpoints and logs; created recursively
+                if missing.
             recorder: Where each logged step's metrics go. Defaults to a
-                RunDirRecorder writing into run_dir.
+                :class:`RunDirRecorder` writing into ``run_dir``, which is also
+                created here.
         """
         self.cfg = cfg
         self.dataset = dataset
@@ -49,13 +60,16 @@ class Trainer:
         """Run a forward pass and compute the combined training loss.
 
         Args:
-            x: Input token ids of shape (B, block_size).
-            y: Target token ids of shape (B, block_size).
+            x: Input token ids of shape ``(B, block_size)``.
+            y: Target token ids of shape ``(B, block_size)``, i.e. ``x``
+                shifted by one token.
 
         Returns:
-            A tuple (total_loss, ce_loss, aux_loss): total_loss = ce_loss +
-            aux_loss, used for backprop; ce_loss and aux_loss are returned
-            separately for logging.
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple
+            ``(total_loss, ce_loss, aux_loss)`` where ``total_loss`` is the
+            cross-entropy plus the MoE auxiliary loss (the quantity used for
+            backprop), and ``ce_loss``/``aux_loss`` are returned separately so
+            callers can log them individually.
         """
         out = self.model(x)
         logits = out.logits
@@ -65,9 +79,15 @@ class Trainer:
     def train_step(self) -> tuple[float, float]:
         """Run a single training step: forward, backward, then the schedule's step.
 
+        Switches the model to train mode, samples a fresh training batch,
+        computes the combined loss, zeroes the gradients, backpropagates,
+        applies the schedule's gradient clipping plus optimizer update, and
+        advances the internal step counter.
+
         Returns:
-            A tuple (loss, ce_loss): the combined loss and the cross-entropy
-            component, both as Python floats.
+            tuple[float, float]: A pair ``(loss, ce_loss)``: the combined loss
+            and its cross-entropy component, both as Python floats detached
+            from the autograd graph for cheap logging.
         """
         self.model.train()
         x, y = self.dataset.get_batch(
@@ -85,8 +105,12 @@ class Trainer:
     def evaluate(self) -> float:
         """Compute the average validation loss over cfg.train.eval_iters batches.
 
+        Runs under ``torch.no_grad`` in eval mode, averaging the combined
+        (cross-entropy plus aux) loss over a fixed number of validation
+        batches, then restores the model to train mode before returning.
+
         Returns:
-            Mean combined (cross-entropy + aux) loss on the validation split.
+            float: The mean combined loss on the validation split.
         """
         self.model.eval()
         total = 0.0
@@ -102,12 +126,18 @@ class Trainer:
     def save_checkpoint(self, path: str | Path | None = None) -> Path:
         """Save model, schedule, step, RNG state, and configs to a checkpoint file.
 
+        Serializes everything needed to resume training exactly where it left
+        off: the model weights, the schedule state (optimizer moments and LR
+        curve position), the step counter, the global RNG state, and both the
+        model and training configs so the run can be reconstructed without
+        re-passing the original CLI arguments.
+
         Args:
             path: Destination path. Defaults to
-                run_dir/ckpt_step{step}.pt if not given.
+                ``run_dir/ckpt_step{step}.pt`` when not given.
 
         Returns:
-            The path the checkpoint was written to.
+            Path: The path the checkpoint was written to.
         """
         path = Path(path) if path is not None else self.run_dir / f"ckpt_step{self.step}.pt"
         torch.save(
@@ -126,15 +156,23 @@ class Trainer:
     def load_checkpoint(self, path: str | Path) -> int:
         """Restore model, schedule, step, and RNG state from a checkpoint.
 
+        Loads the checkpoint to CPU first (so large GPU checkpoints do not
+        allocate GPU memory during deserialization), then restores the model
+        weights, the schedule state, the step counter, and the global RNG
+        state. Rejecting pre-``TrainingSchedule`` checkpoints up front prevents
+        a silent resume with a broken LR curve.
+
         Args:
-            path: Path to a checkpoint file saved by save_checkpoint.
+            path: Path to a checkpoint file saved by :meth:`save_checkpoint`.
 
         Returns:
-            The restored step count.
+            int: The restored step count, so callers can report where training
+            resumed.
 
         Raises:
-            KeyError: If the checkpoint predates the "schedule" key, i.e. was
-                written when the Trainer stored a bare "optimizer" instead.
+            KeyError: If the checkpoint predates the ``"schedule"`` key, i.e.
+                was written when the Trainer stored a bare ``"optimizer"``
+                instead.
         """
         ckpt = torch.load(path, map_location="cpu")
         if "schedule" not in ckpt and "optimizer" in ckpt:
@@ -153,8 +191,14 @@ class Trainer:
     def train(self) -> int:
         """Run the training loop until max_steps, recording and checkpointing periodically.
 
+        Loops training steps until ``max_steps`` is reached. Every
+        ``log_every`` steps a train-loss record is logged; every
+        ``eval_interval`` steps a validation loss is computed and recorded;
+        every ``checkpoint_every`` steps a checkpoint is saved to
+        ``run_dir/ckpt_step{step}.pt``.
+
         Returns:
-            The final step count.
+            int: The final step count, equal to ``cfg.train.max_steps``.
         """
         while self.step < self.cfg.train.max_steps:
             t0 = time.time()

@@ -11,7 +11,10 @@ They played together all afternoon and became best friends.
 
 
 def _write_local_raw_corpus(raw_dir: Path) -> None:
-    """Writes train.txt/valid.txt into raw_dir so download_corpus is a no-op.
+    """Writes local corpus files so the download step is skipped.
+
+    Places ``train.txt`` and ``valid.txt`` into ``raw_dir``, allowing the
+    prepare-data CLI to run entirely offline with a deterministic corpus.
 
     Args:
         raw_dir: Directory to write the two corpus files into.
@@ -22,7 +25,11 @@ def _write_local_raw_corpus(raw_dir: Path) -> None:
 
 
 def test_cli_prepare_data_end_to_end_smoke(tmp_path: Path) -> None:
-    """Checks that the prepare-data CLI runs end-to-end and writes tokenizer, bins, and meta.json.
+    """Verifies the prepare-data pipeline produces all expected artifacts.
+
+    Confirms the CLI trains a tokenizer and emits the binary training and
+    validation datasets together with a ``meta.json`` describing the
+    vocabulary size and token counts.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -52,7 +59,11 @@ def test_cli_prepare_data_end_to_end_smoke(tmp_path: Path) -> None:
 
 
 def test_cli_prepare_data_does_not_retrain_tokenizer_if_present(tmp_path: Path) -> None:
-    """Checks that a second CLI invocation reuses an existing tokenizer instead of retraining.
+    """Verifies the CLI reuses an existing tokenizer instead of retraining it.
+
+    Re-running the command must not regenerate the tokenizer artifacts, so the
+    vocab file keeps its original modification time. This prevents wasted work
+    on large corpora.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -79,3 +90,13 @@ def test_cli_prepare_data_does_not_retrain_tokenizer_if_present(tmp_path: Path) 
 
     print(f"[no-retrain] vocab_mtime_1={vocab_mtime_1} vocab_mtime_2={vocab_mtime_2}")
     assert vocab_mtime_1 == vocab_mtime_2  # not retrained the second time
+
+    # Reusing the tokenizer must not skip encoding: the second run still owes
+    # the caller a complete dataset in its own bin dir.
+    with open(tmp_path / "bin2" / "meta.json") as f:
+        meta = json.load(f)
+    print(f"[no-retrain] second_run_meta={meta}")
+    assert (tmp_path / "bin2" / "train.bin").exists()
+    assert (tmp_path / "bin2" / "val.bin").exists()
+    assert meta["train_tokens"] > 0
+    assert meta["val_tokens"] > 0

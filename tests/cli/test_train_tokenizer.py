@@ -16,7 +16,11 @@ The sun was warm and the grass was green and soft.
 
 
 def test_cli_train_tokenizer_end_to_end_smoke(tmp_path: Path) -> None:
-    """Checks that the train-tokenizer CLI trains a BPE tokenizer with the requested vocab size.
+    """Verifies the end-to-end flow of the train-tokenizer CLI.
+
+    Confirms that a BPE tokenizer is trained with the requested vocabulary
+    size and that both serialized artifacts (``vocab.json`` and ``merges.txt``)
+    are written to the output directory.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -36,7 +40,11 @@ def test_cli_train_tokenizer_end_to_end_smoke(tmp_path: Path) -> None:
 
 
 def test_cli_train_tokenizer_requires_corpus_path() -> None:
-    """Checks that omitting the required corpus_path argument makes argparse exit with an error."""
+    """Verifies that the CLI fails when the required ``corpus_path`` argument is omitted.
+
+    Guards the required positional argument so a missing value aborts early
+    through ``argparse`` instead of failing later with a confusing error.
+    """
     with pytest.raises(SystemExit) as exc_info:
         main(["--vocab-size", "300"])
     print(f"[missing-arg] SystemExit code={exc_info.value.code}")

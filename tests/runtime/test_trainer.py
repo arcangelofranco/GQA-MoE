@@ -22,7 +22,10 @@ def _overfit_single_batch(
     block_size: int,
     seed: int = 1337,
 ) -> list[float]:
-    """Trains a fresh model on one fixed random batch to check it can overfit.
+    """Trains a fresh model on one fixed random batch to verify it can overfit.
+
+    Each iteration mirrors a Trainer step: total loss (cross-entropy plus
+    auxiliary), backward pass, then one optimizer step through the schedule.
 
     Args:
         model_cfg: Model architecture config.
@@ -56,7 +59,11 @@ def _overfit_single_batch(
 
 
 def test_gate_overfit_reduced_architecture() -> None:
-    """Checks that the reduced ("overfit") architecture can drive loss near zero on one batch."""
+    """Checks that the reduced ("overfit") architecture can drive loss near zero on one batch.
+
+    Also verifies the initial loss sits near the chance-level baseline (a
+    sane start), so the convergence is measured from a healthy beginning.
+    """
     overfit = RunConfig.preset("overfit", vocab_size=100)
     model_cfg, train_cfg = overfit.model, overfit.train
     losses = _overfit_single_batch(
@@ -74,7 +81,11 @@ def test_gate_overfit_reduced_architecture() -> None:
 
 
 def test_gate_overfit_real_nano_architecture() -> None:
-    """Checks that the real "nano" architecture reduces loss substantially on one batch."""
+    """Checks that the real "nano" architecture reduces loss substantially on one batch.
+
+    Verifies every recorded loss stays finite and that the final loss drops
+    well below the initial one.
+    """
     model_cfg = RunConfig.preset("nano", vocab_size=64).model
     train_cfg = TrainConfig(
         batch_size=4, block_size=32, target_tokens=4 * 32 * 40,  # 40 steps
@@ -115,10 +126,14 @@ def _tiny_run_config(
 def test_trainer_checkpoint_resume(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that a Trainer resumed from a checkpoint matches the original at that step and can finish training.
+    """Checks that a Trainer resumed from a checkpoint can finish training.
+
+    Verifies that the step counter, learning rate and every model parameter
+    exactly match the original trainer at the checkpoint step, proving the
+    resume path restores a consistent state rather than a partial one.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -160,10 +175,14 @@ def test_trainer_checkpoint_resume(
 def test_resume_from_pre_schedule_checkpoint_fails_loudly(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that loading a legacy (pre-TrainingSchedule) checkpoint raises a clear KeyError.
+    """Checks that loading a legacy (pre-TrainingSchedule) checkpoint fails loudly.
+
+    Ensures a KeyError naming "pre-TrainingSchedule" is raised instead of
+    failing later with an unrelated error, so backward-incompatible
+    checkpoints are easy to diagnose.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -195,10 +214,10 @@ def test_resume_from_pre_schedule_checkpoint_fails_loudly(
 def test_trainer_full_run_reaches_max_steps_and_writes_log(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that a full training run reaches max_steps and writes train.log.
+    """Checks that trainer.train() runs to max_steps and writes train.log.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -218,10 +237,13 @@ def test_trainer_full_run_reaches_max_steps_and_writes_log(
 def test_evaluate_uses_eval_mode_and_returns_finite_average(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that evaluate() returns a finite loss and leaves the model back in training mode.
+    """Checks that evaluate() switches to eval mode, returns a finite loss, and restores training mode.
+
+    Verifies the model is back in training mode afterwards, so the next
+    train_step() is not silently run with the eval flag.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -239,10 +261,13 @@ def test_evaluate_uses_eval_mode_and_returns_finite_average(
 def test_train_step_returns_loss_and_pure_ce_loss(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that train_step() returns a finite total loss no smaller than the pure CE loss.
+    """Checks that train_step() returns a finite total loss above the pure CE loss.
+
+    The total loss includes the auxiliary loss, so it must never come out
+    smaller than the standalone cross-entropy component.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -261,10 +286,13 @@ def test_train_step_returns_loss_and_pure_ce_loss(
 def test_recorded_steps_carry_loss_and_perplexity(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that every recorded step's perplexity matches exp() of its own loss.
+    """Checks that recorded steps keep perplexity consistent with their loss.
+
+    Verifies that every record carrying a train or validation loss also
+    carries the matching perplexity, equal to exp() of that same loss.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -289,10 +317,13 @@ def test_recorded_steps_carry_loss_and_perplexity(
 def test_train_and_val_land_on_one_record_when_intervals_match(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that matching train/eval intervals merge both measurements into one record per step.
+    """Checks that aligned train/eval intervals merge both measurements into one record per step.
+
+    Also verifies each merged record carries the expected bookkeeping fields
+    (step, max_steps, lr, ms_step) so downstream consumers can rely on them.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -314,10 +345,13 @@ def test_train_and_val_land_on_one_record_when_intervals_match(
 def test_records_omit_the_measurement_that_did_not_run(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that a step recorded without an eval leaves val_loss/val_ppl as None.
+    """Checks that records without an eval leave the validation fields as None.
+
+    Confirms a recorded train loss is kept while the matching perplexity and
+    validation measurements are omitted, not filled with placeholders.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """
@@ -338,10 +372,10 @@ def test_records_omit_the_measurement_that_did_not_run(
 def test_default_recorder_writes_both_files_into_the_run_dir(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that the default (non-injected) recorder writes both train.log and metrics.jsonl.
+    """Checks that the default (non-injected) recorder persists both train.log and metrics.jsonl.
 
     Args:
-        tmp_path: Pytest-provided temporary directory.
+        tmp_path: Temporary directory provided by pytest.
         write_synthetic_bin_dataset: Fixture factory that writes a fake
             binary token dataset and returns its directory.
     """

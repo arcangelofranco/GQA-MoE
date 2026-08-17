@@ -8,7 +8,11 @@ from src.cli.train import main
 
 
 def _write_tiny_yaml(path: Path, vocab_size: int) -> None:
-    """Writes a minimal training config YAML for CLI smoke tests.
+    """Creates a minimal training config YAML for the CLI smoke tests.
+
+    The generated config keeps the model and training settings small so the
+    end-to-end tests run quickly on CPU while still exercising real config
+    parsing and checkpointing.
 
     Args:
         path: File path to write the YAML config to.
@@ -46,7 +50,11 @@ runtime:
 def test_cli_train_end_to_end_smoke(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that the train CLI runs end-to-end and writes a valid final checkpoint.
+    """Verifies the train CLI trains to the configured maximum step and checkpoints.
+
+    Confirms that a full run writes ``final.pt`` and ``train.log`` and that the
+    checkpoint records the expected final step, guarding against premature
+    termination or checkpoint corruption.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -84,7 +92,10 @@ def test_cli_train_end_to_end_smoke(
 def test_cli_train_rejects_vocab_size_mismatch(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that a dataset/config vocab size mismatch raises ValueError.
+    """Verifies that a mismatch between dataset and config vocab size raises ``ValueError``.
+
+    Training on misaligned vocabularies would silently produce garbage, so the
+    CLI must reject the run at startup instead of training on bad data.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -108,7 +119,10 @@ def test_cli_train_rejects_vocab_size_mismatch(
 def test_cli_train_resume(
     tmp_path: Path, write_synthetic_bin_dataset: Callable[..., Path]
 ) -> None:
-    """Checks that resuming from a checkpoint already at max_steps does not train further.
+    """Verifies that resuming from a checkpoint already at ``max_steps`` is idempotent.
+
+    The CLI must not take further training steps when the resumed checkpoint is
+    already complete, preventing unnecessary work and wasted compute.
 
     Args:
         tmp_path: Pytest-provided temporary directory.

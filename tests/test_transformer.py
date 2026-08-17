@@ -12,12 +12,15 @@ from src.model.kv_cache import KVCache
 def _small_cfg(**overrides: object) -> SimpleNamespace:
     """Builds a small model config namespace, overridable per field.
 
+    Central helper for tests that need a config fast to instantiate; individual
+    tests can tweak a single field while inheriting sensible defaults.
+
     Args:
         **overrides: Field values overriding the small-model defaults.
 
     Returns:
-        A `SimpleNamespace` with all fields `Transformer` expects,
-        including the derived `hidden_dim = n_heads * head_dim`.
+        A :class:`SimpleNamespace` with all fields :class:`Transformer` expects,
+        including the derived ``hidden_dim = n_heads * head_dim``.
     """
     defaults = dict(
         vocab_size=100, n_layers=3, n_heads=4, n_kv_heads=2, head_dim=16,
@@ -32,10 +35,13 @@ def _small_cfg(**overrides: object) -> SimpleNamespace:
 
 
 def _nano_cfg() -> SimpleNamespace:
-    """Builds a config matching the "nano" preset's architecture.
+    """Builds a config matching the ``nano`` preset's architecture.
+
+    Used to validate parameter counts and behaviour against the released
+    preset sizes.
 
     Returns:
-        The "nano"-sized config namespace.
+        The ``nano``-sized config namespace.
     """
     return _small_cfg(
         vocab_size=8000, n_layers=12, n_heads=8, n_kv_heads=2, head_dim=32,
@@ -44,10 +50,13 @@ def _nano_cfg() -> SimpleNamespace:
 
 
 def _small_preset_cfg() -> SimpleNamespace:
-    """Builds a config matching the "small" preset's architecture.
+    """Builds a config matching the ``small`` preset's architecture.
+
+    Used to validate parameter counts and behaviour against the released
+    preset sizes.
 
     Returns:
-        The "small"-sized config namespace.
+        The ``small``-sized config namespace.
     """
     return _small_cfg(
         vocab_size=16000, n_layers=16, n_heads=8, n_kv_heads=4, head_dim=64,
@@ -59,7 +68,10 @@ def _small_preset_cfg() -> SimpleNamespace:
 @pytest.mark.parametrize("b", [1, 2, 3])
 @pytest.mark.parametrize("s", [1, 8, 16])
 def test_output_shape(b: int, s: int) -> None:
-    """Checks that the Transformer's logits are shaped (B, S, vocab_size).
+    """Verifies that the model's logits are shaped ``(B, S, vocab_size)``.
+
+    Downstream loss and sampling code depends on this exact shape, so any
+    deviation would break training and generation.
 
     Args:
         b: Batch size.
@@ -75,7 +87,15 @@ def test_output_shape(b: int, s: int) -> None:
 
 
 def test_forward_output_fields_are_named_and_ordered() -> None:
-    """Checks that ForwardOutput exposes (logits, aux_loss, kv_caches) as a named, ordered tuple."""
+    """Verifies that :class:`ForwardOutput` exposes its fields as a named, ordered tuple.
+
+    Both attribute access (``out.logits``) and tuple unpacking (``logits,
+    aux_loss, kv_caches``) are supported call patterns and must stay stable.
+
+    Raises:
+        AssertionError: If the output is not a named tuple with the expected
+            fields, or the logits are misshaped.
+    """
     torch.manual_seed(0)
     cfg = _small_cfg()
     model = Transformer(cfg)
@@ -95,10 +115,13 @@ def test_forward_output_fields_are_named_and_ordered() -> None:
 
 @pytest.mark.parametrize("tie", [True, False], ids=["tied", "untied"])
 def test_weight_tying(tie: bool) -> None:
-    """Checks that tie_embeddings controls whether lm_head shares storage with the embeddings.
+    """Verifies that ``tie_embeddings`` controls whether the head shares storage with the embeddings.
+
+    Weight tying halves the embedding parameter footprint when enabled, and the
+    two modes must not be conflated at initialization time.
 
     Args:
-        tie: Whether `tie_embeddings` is enabled for this config.
+        tie: Whether ``tie_embeddings`` is enabled for this config.
     """
     cfg = _small_cfg(tie_embeddings=tie)
     model = Transformer(cfg)
@@ -117,7 +140,10 @@ PARAM_PRESETS = [
 def test_param_count_matches_validated_presets(
     cfg_fn: Callable[[], SimpleNamespace], expected: int, name: str
 ) -> None:
-    """Checks that a preset-equivalent config's parameter count matches the validated reference.
+    """Verifies that a preset-equivalent config's parameter count matches the validated reference.
+
+    Locks the architecture's parameter count to a known-good reference, so any
+    accidental change in layer sizes or tied embeddings is caught immediately.
 
     Args:
         cfg_fn: Zero-arg factory building the config to instantiate.
@@ -132,7 +158,11 @@ def test_param_count_matches_validated_presets(
 
 @pytest.mark.parametrize("n_layers", [8], ids=["8layers"])
 def test_differentiated_init_residual_stream(n_layers: int) -> None:
-    """Checks that output projections are initialized with a tighter std than input projections.
+    """Verifies that output projections use a tighter init std than input projections.
+
+    Scaling output projections by ``1 / sqrt(2 * n_layers)`` keeps the residual
+    stream variance bounded as depth grows, which is essential for stable
+    training of deep models.
 
     Args:
         n_layers: Number of transformer layers to build.
@@ -155,7 +185,11 @@ def test_differentiated_init_residual_stream(n_layers: int) -> None:
 @pytest.mark.parametrize("b", [2])
 @pytest.mark.parametrize("s", [32])
 def test_no_nan_or_inf_in_logits(b: int, s: int) -> None:
-    """Checks that both logits and aux_loss stay finite for a forward pass.
+    """Verifies that a forward pass produces finite logits and auxiliary loss.
+
+    NaN or inf values in the first forward pass would indicate broken
+    initialization, NaN-prone layers, or unstable numerics that would abort
+    training.
 
     Args:
         b: Batch size.
@@ -176,7 +210,15 @@ def test_no_nan_or_inf_in_logits(b: int, s: int) -> None:
 
 
 def test_aux_loss_coeff_applied_exactly_once() -> None:
-    """Checks that aux_loss_coeff scales the raw MoE aux loss exactly once, not cumulatively."""
+    """Verifies that ``aux_loss_coeff`` scales the raw MoE aux loss exactly once.
+
+    Cumulative scaling would silently overweight the auxiliary loss across
+    layers, distorting the intended load-balancing trade-off.
+
+    Raises:
+        AssertionError: If the reported aux loss is not the single-scaled raw
+            MoE aux loss.
+    """
     torch.manual_seed(0)
     cfg = _small_cfg(n_layers=1, aux_loss_coeff=0.37)
     model = Transformer(cfg)
@@ -201,10 +243,16 @@ def test_aux_loss_coeff_applied_exactly_once() -> None:
 
 @pytest.mark.parametrize("n_layers", [3], ids=["3layers"])
 def test_aux_loss_total_gradient_reaches_every_block_router(n_layers: int) -> None:
-    """Checks that backpropagating through logits + aux_loss reaches every block's router.
+    """Verifies that backpropagating through the total loss reaches every block's router.
+
+    Routers are trained through the auxiliary loss, so any block whose router
+    receives no gradient would be updated only by chance and could collapse.
 
     Args:
         n_layers: Number of transformer layers to build.
+
+    Raises:
+        AssertionError: If any block's router has a zero or missing gradient.
     """
     torch.manual_seed(0)
     cfg = _small_cfg(n_layers=n_layers)
@@ -226,11 +274,19 @@ def test_aux_loss_total_gradient_reaches_every_block_router(n_layers: int) -> No
 @pytest.mark.parametrize("b", [1])
 @pytest.mark.parametrize("s", [10, 20])
 def test_kv_cache_equivalence_full_model(b: int, s: int) -> None:
-    """Checks that step-by-step KV-cache decoding matches a full forward pass on the whole model.
+    """Verifies that step-by-step KV-cache decoding matches a full forward pass.
+
+    Decoding token-by-token with the cache must reproduce the same logits as a
+    single full forward, otherwise cached generation would diverge from
+    non-cached inference.
 
     Args:
         b: Batch size.
         s: Sequence length.
+
+    Raises:
+        AssertionError: If cached and full-forward logits differ beyond the
+            tolerance.
     """
     torch.manual_seed(0)
     cfg = _small_cfg()

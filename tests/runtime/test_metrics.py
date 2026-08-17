@@ -38,7 +38,11 @@ def test_perplexity_is_derived_from_loss() -> None:
 
 
 def test_perplexity_is_none_when_its_loss_is_absent() -> None:
-    """Checks that a missing loss yields a None perplexity, independently per field."""
+    """Checks that a missing loss yields a None perplexity, independently per field.
+
+    Verifies the two fields are decoupled: dropping the validation loss must
+    not affect the train perplexity.
+    """
     m = _full(val_loss=None)
     print(f"[ppl-absent] val_loss={m.val_loss} -> val_ppl={m.val_ppl} train_ppl={m.train_ppl}")
     assert m.val_ppl is None
@@ -46,7 +50,7 @@ def test_perplexity_is_none_when_its_loss_is_absent() -> None:
 
 
 def test_to_dict_is_json_serializable_and_keeps_absences_as_null() -> None:
-    """Checks that to_dict() round-trips through JSON and keeps None as null."""
+    """Checks that to_dict() round-trips through JSON and serializes absences as null."""
     payload = json.loads(json.dumps(_full(val_loss=None).to_dict()))
     print(f"[to_dict] payload={payload}")
     assert payload["train_loss"] == pytest.approx(4.1203)
@@ -85,7 +89,11 @@ def test_line_omits_the_pair_whose_measurement_is_absent() -> None:
 
 
 def test_in_memory_recorder_keeps_records_in_order() -> None:
-    """Checks that InMemoryRecorder stores records in the order they were recorded."""
+    """Checks that InMemoryRecorder stores records in the order they were recorded.
+
+    Verifies the recorder starts empty and keeps every record exactly once,
+    preserving the insertion order across record() calls.
+    """
     recorder = InMemoryRecorder()
     assert recorder.records == []
 

@@ -42,7 +42,12 @@ def _train_cfg(**overrides: int | float) -> TrainConfig:
 
 
 def test_param_groups_split_by_dim_and_cover_every_parameter() -> None:
-    """Checks that param groups split by ndim (decay vs. no-decay) and cover every parameter."""
+    """Checks that parameters are split into decay and no-decay groups by ndim.
+
+    Verifies the groups apply weight_decay and 0.0 respectively, follow the
+    ndim>=2 boundary, and together cover every model parameter with no loss
+    or duplication (relevant with weight tying).
+    """
     model = _tiny_model()
     train_cfg = _train_cfg()
     schedule = TrainingSchedule(model, train_cfg, RuntimeConfig())
@@ -63,7 +68,7 @@ def test_param_groups_split_by_dim_and_cover_every_parameter() -> None:
 
 
 def test_no_decay_group_contains_norm_weights_only() -> None:
-    """Checks that the no-decay param group contains exactly the norm weights."""
+    """Checks that the no-decay group contains exactly the norm weights, and nothing else."""
     model = _tiny_model()
     schedule = TrainingSchedule(model, _train_cfg(), RuntimeConfig())
     _, no_decay_group = schedule.param_groups
@@ -77,7 +82,11 @@ def test_no_decay_group_contains_norm_weights_only() -> None:
 
 
 def test_lr_schedule_warmup_then_cosine_decay() -> None:
-    """Checks that the LR schedule rises linearly through warmup then cosine-decays to min_lr."""
+    """Checks that the LR rises linearly through warmup then cosine-decays to min_lr.
+
+    Verifies the schedule reaches max_lr exactly at the end of warmup, never
+    drops below min_lr, and lands on min_lr at the final step.
+    """
     model = _tiny_model()
     train_cfg = _train_cfg(warmup_steps=10, max_lr=1e-3, min_lr=1e-4)
     schedule = TrainingSchedule(model, train_cfg, RuntimeConfig())
@@ -103,7 +112,11 @@ def test_lr_schedule_warmup_then_cosine_decay() -> None:
 
 
 def test_resume_continues_schedule_without_restarting_warmup() -> None:
-    """Checks that resuming from a mid-schedule checkpoint continues the LR curve, not restarts it."""
+    """Checks that resuming from a mid-schedule checkpoint continues the LR curve.
+
+    Verifies the resumed learning rates match the reference run at the same
+    positions, i.e. warmup is not restarted from scratch.
+    """
     model = _tiny_model()
     train_cfg = _train_cfg(warmup_steps=10, max_lr=1e-3, min_lr=1e-4)
     runtime_cfg = RuntimeConfig()
@@ -132,8 +145,9 @@ def test_resume_continues_schedule_without_restarting_warmup() -> None:
 def test_resume_restores_optimizer_moments_not_just_the_curve() -> None:
     """Checks that resuming restores AdamW's optimizer moments, not just the step counter.
 
-    The LR curve is a pure function of the step and would survive even
-    saving only the counter: AdamW's moments would not.
+    The LR curve is a pure function of the step and would survive saving
+    only the counter; AdamW's moments would not, so they must be persisted
+    and restored explicitly.
     """
     model = _tiny_model()
     train_cfg = _train_cfg()
@@ -165,7 +179,11 @@ def test_resume_restores_optimizer_moments_not_just_the_curve() -> None:
 
 
 def test_gradients_are_clipped_to_grad_clip() -> None:
-    """Checks that schedule.step() clips the gradient norm down to grad_clip."""
+    """Checks that schedule.step() clips the gradient norm down to grad_clip.
+
+    Uses a grad_clip small enough that clipping always engages, so the test
+    cannot silently pass without actually clipping anything.
+    """
     model = _tiny_model()
     train_cfg = _train_cfg(grad_clip=1e-4)  # tight enough to always bite
     schedule = TrainingSchedule(model, train_cfg, RuntimeConfig())

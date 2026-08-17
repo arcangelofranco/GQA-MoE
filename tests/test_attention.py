@@ -18,14 +18,15 @@ MAX_SEQ_LEN = 1024
 
 
 def _make_attn(config: SimpleNamespace, name: str = "nano") -> GQAttention:
-    """Builds a GQAttention module from a test config namespace.
+    """Build a GQAttention module from a duck-typed test config.
 
     Args:
-        config: Duck-typed model config (n_heads, n_kv_heads, head_dim, hidden_dim, rms_norm_eps).
+        config: Minimal config namespace exposing ``n_heads``, ``n_kv_heads``,
+            ``head_dim``, ``hidden_dim``, and ``rms_norm_eps``.
         name: Unused; kept for call-site readability in parametrized tests.
 
     Returns:
-        A freshly initialized `GQAttention`.
+        GQAttention: A freshly initialized attention module.
     """
     return GQAttention(config)
 
@@ -34,7 +35,11 @@ def _make_attn(config: SimpleNamespace, name: str = "nano") -> GQAttention:
 @pytest.mark.parametrize("s", [1, 16, 512])
 @pytest.mark.parametrize("b", [1, 4])
 def test_shape(b: int, s: int, config: SimpleNamespace) -> None:
-    """Checks that GQAttention preserves (B, S, hidden_dim) and stays finite.
+    """Verify that GQAttention preserves (B, S, hidden_dim) and stays finite.
+
+    Guards the output contract every downstream block relies on, across both
+    configs and a sweep of batch and sequence sizes, including single-token
+    inputs used during incremental decoding.
 
     Args:
         b: Batch size.
@@ -55,7 +60,12 @@ def test_shape(b: int, s: int, config: SimpleNamespace) -> None:
 
 @pytest.mark.parametrize("config", CONFIGS, ids=["nano", "small"])
 def test_causality(config: SimpleNamespace) -> None:
-    """Checks that changing a future token does not change earlier positions' output.
+    """Verify that changing a future token does not affect earlier positions.
+
+    The causal mask must make each position depend only on the current and past
+    tokens; rewriting a future position's input must leave every earlier output
+    bit-identical, which is the correctness property that makes autoregressive
+    decoding valid.
 
     Args:
         config: Model config under test (nano or small).
@@ -84,7 +94,12 @@ def test_causality(config: SimpleNamespace) -> None:
 @pytest.mark.parametrize("b", [1, 2])
 @pytest.mark.parametrize("s", [16, 128])
 def test_kv_cache_equivalence(config: SimpleNamespace, b: int, s: int) -> None:
-    """Checks that step-by-step KV-cache decoding matches a full forward pass.
+    """Verify that incremental KV-cache decoding matches a full forward pass.
+
+    Feeds the same input one token at a time through the cache and compares
+    the concatenated output against a single batched forward. This is the key
+    invariance for generation: caching must be a pure performance optimization
+    that never changes the produced logits.
 
     Args:
         config: Model config under test (nano or small).

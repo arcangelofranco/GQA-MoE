@@ -12,7 +12,7 @@ N_HEADS = 4
 @pytest.mark.parametrize("s", S_LENS)
 @pytest.mark.parametrize("dim", HEAD_DIMS)
 def test_shape(s: int, dim: int) -> None:
-    """Checks that applying RoPE preserves the input tensor shape.
+    """Verifies that ``apply_rope`` preserves the input tensor shape.
 
     Args:
         s: Sequence length.
@@ -28,7 +28,10 @@ def test_shape(s: int, dim: int) -> None:
 @pytest.mark.parametrize("s", S_LENS)
 @pytest.mark.parametrize("dim", HEAD_DIMS)
 def test_isometry(s: int, dim: int) -> None:
-    """Checks that RoPE is an isometry: it preserves each vector's norm.
+    """Verifies that RoPE is an isometry, preserving each vector's norm.
+
+    Positional rotation must not change vector lengths, otherwise attention
+    logits would be biased by absolute position.
 
     Args:
         s: Sequence length.
@@ -50,7 +53,10 @@ def test_isometry(s: int, dim: int) -> None:
 
 @pytest.mark.parametrize("dim", HEAD_DIMS)
 def test_precompute_idempotent(dim: int) -> None:
-    """Checks that precompute_rope returns identical tensors across repeated calls.
+    """Verifies that ``precompute_rope`` is deterministic across repeated calls.
+
+    Identical calls must return bitwise-equal tables so training and inference
+    always use the same positional encoding.
 
     Args:
         dim: Head dimension.
@@ -67,8 +73,10 @@ def test_precompute_idempotent(dim: int) -> None:
 
 @pytest.mark.parametrize("dim", HEAD_DIMS)
 def test_positional_selectivity(dim: int) -> None:
-    """Checks that rotating two copies of the same vector to different positions
-    lowers their dot product relative to the unrotated pair.
+    """Verifies that RoPE makes equal vectors at different positions less aligned.
+
+    Rotating two identical vectors to distinct positions must lower their dot
+    product, confirming the encoding injects position-aware selectivity.
 
     Args:
         dim: Head dimension.
@@ -90,7 +98,10 @@ def test_positional_selectivity(dim: int) -> None:
 
 @pytest.mark.parametrize("dim", HEAD_DIMS)
 def test_rotate_half_inverse(dim: int) -> None:
-    """Checks that applying rotate_half twice negates the original tensor.
+    """Verifies that applying ``rotate_half`` twice negates the input tensor.
+
+    A double rotation by half the dimensions must equal a sign flip, which is
+    the identity needed by the RoPE formulation.
 
     Args:
         dim: Head dimension.
@@ -108,7 +119,11 @@ def test_rotate_half_inverse(dim: int) -> None:
 @pytest.mark.parametrize("s", [16, 512])
 @pytest.mark.parametrize("dim", HEAD_DIMS)
 def test_absolute_offset(s: int, dim: int) -> None:
-    """Checks that RoPE output depends on the absolute position offset, not just relative order.
+    """Verifies that RoPE depends on the absolute position, not the relative order.
+
+    Shifting every token by the same offset must change the encoded
+    representations, since the same relative order would otherwise collapse
+    different contexts together.
 
     Args:
         s: Sequence length.

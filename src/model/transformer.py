@@ -14,16 +14,17 @@ from src.model.kv_cache import KVCache
 class ForwardOutput(NamedTuple):
     """Everything one Transformer forward pass produces.
 
-    The three results serve different callers — generation reads the logits
-    and the caches, training reads the logits and the aux loss — so they are
-    named rather than positional: adding a field cannot silently shift what a
-    caller reads. A NamedTuple rather than a dataclass because it stays a
-    plain tuple at runtime, which is what torch's output handling expects.
+    The three results serve different callers: generation reads the logits and
+    the caches, while training reads the logits and the aux loss. They are
+    therefore named rather than positional, so adding a field cannot silently
+    shift what a caller reads. A NamedTuple is used rather than a dataclass
+    because it stays a plain tuple at runtime, which is what torch's output
+    handling expects.
 
     Attributes:
-        logits: Next-token scores of shape (B, S, vocab_size).
-        aux_loss: MoE load-balancing loss, summed over blocks and scaled by
-            aux_loss_coeff exactly once. A 0.0 tensor outside training.
+        logits: Next-token scores of shape ``(B, S, vocab_size)``.
+        aux_loss: MoE load-balancing loss, summed over all blocks and scaled by
+            ``aux_loss_coeff`` exactly once. A ``0.0`` tensor outside training.
         kv_caches: One updated cache per block, to hand back to the next
             incremental call.
     """
@@ -34,10 +35,25 @@ class ForwardOutput(NamedTuple):
 
 
 class Transformer(nn.Module):
-    """Decoder-only Transformer with GQA and MoE feed-forward blocks."""
+    """Decoder-only Transformer with GQA and MoE feed-forward blocks.
+
+    A full autoregressive language model following the pre-norm Llama-style
+    layout: token embeddings, a stack of :class:`TransformerBlock` layers that
+    mix grouped-query attention with sparse MoE feed-forward modules, a final
+    RMSNorm, and a linear output head. Supports both batched training and
+    incremental decoding with per-block KV caches, and optionally ties the
+    output head to the token embedding matrix to save parameters.
+    """
 
     def __init__(self, config: ModelConfig):
         """Build the embedding, blocks, output head, and RoPE tables, then init weights.
+
+        Constructs every sub-module, precomputes the RoPE tables and registers
+        them as non-persistent buffers (they are derived from config and do not
+        need to be saved in checkpoints), then applies the initialization
+        scheme. Residual projection weights (``wo`` and ``down_proj``) are
+        scaled down relative to the base initialization to compensate for the
+        accumulation of residual streams across the model depth.
 
         Args:
             config: Model configuration, forwarded to every sub-module.
@@ -68,8 +84,13 @@ class Transformer(nn.Module):
     def _init_weights(self, module: nn.Module) -> None:
         """Initialize Linear/Embedding weights with a normal distribution.
 
+        Applies a zero-mean, ``std=0.02`` normal initialization to the weights
+        of linear and embedding modules. Intended to be passed to
+        ``nn.Module.apply``, which visits every sub-module of the model.
+
         Args:
-            module: Sub-module being visited by `self.apply`.
+            module: Sub-module being visited by ``self.apply``. Modules of
+                other types are left untouched.
         """
         if isinstance(module, (nn.Linear, nn.Embedding)):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -81,18 +102,26 @@ class Transformer(nn.Module):
     ) -> ForwardOutput:
         """Run a forward pass over the whole Transformer.
 
+        Embeds the input tokens, pushes them through every block (each with
+        its own optional KV cache), accumulates the per-block MoE auxiliary
+        losses and scales the total by ``aux_loss_coeff`` exactly once, then
+        applies the final norm and the output head. When ``kv_caches`` is
+        ``None``, a list of ``None`` entries is created internally so the model
+        can run in a cache-free mode.
+
         Args:
-            index: Input token ids of shape (B, S).
-            kv_caches: One KV cache per block, or None during training/prefill
-            without caching. If provided, must have one entry per block.
+            index: Input token ids of shape ``(B, S)``.
+            kv_caches: One KV cache per block, or ``None`` during training and
+                cache-free prefill. When provided, its length must equal the
+                number of blocks, with one entry per block.
 
         Returns:
-            A ForwardOutput carrying the logits, the scaled MoE auxiliary
-            loss, and the updated per-block cache list.
+            ForwardOutput: A named tuple carrying the logits, the scaled MoE
+            auxiliary loss, and the updated per-block cache list.
 
         Raises:
-            ValueError: If kv_caches is provided but its length doesn't match
-            the number of blocks.
+            ValueError: If ``kv_caches`` is provided but its length does not
+                match the number of blocks.
         """
         if kv_caches is None:
             kv_caches = [None] * len(self.blocks)
@@ -118,11 +147,14 @@ class Transformer(nn.Module):
         """Count the model's parameters.
 
         Args:
-            non_embedding: If True, exclude the token embedding weights
-            (useful when embeddings are tied with lm_head).
+            non_embedding: If ``True``, exclude the token embedding weights
+                from the count. This is useful when embeddings are tied with
+                ``lm_head``, so the total reflects the number of distinct
+                parameters actually trained.
 
         Returns:
-            Total number of parameters.
+            int: The total number of parameters (optionally excluding the
+            token embedding matrix).
         """
         n = sum(p.numel() for p in self.parameters())
         if non_embedding:

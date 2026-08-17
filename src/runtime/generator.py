@@ -10,8 +10,17 @@ class TextGenerator:
     """Autoregressive decoding for one model, tokenizer, and sampling policy.
 
     Owns the whole decoding path: prompt encoding, the incremental KV-cache
-    loop, sampling, the <eos> stop condition, and decoding back to text.
-    Everything that stays fixed for a run is stated once, at construction.
+    loop, next-token sampling, the ``<eos>`` stop condition, and decoding back
+    to text. Everything that stays fixed for a run (model, tokenizer, sampling
+    policy, device) is stated once at construction and reused across
+    :meth:`generate` calls.
+
+    Two entry points are offered:
+
+    - :meth:`generate_ids` works at the token-id level and can run without a
+      tokenizer, never stopping early.
+    - :meth:`generate` works on plain text and requires a tokenizer, stopping
+      as soon as every sequence in the batch has emitted ``<eos>``.
     """
 
     def __init__(
@@ -26,14 +35,15 @@ class TextGenerator:
         Args:
             model: Transformer model to generate from.
             tokenizer: Tokenizer used to encode prompts, decode outputs, and
-                resolve the <eos> id. May be None to use the id-level
-                `generate_ids` path only, which never stops early.
+                resolve the ``<eos>`` id. May be ``None`` to use the id-level
+                :meth:`generate_ids` path only, which never stops early.
             policy: How to pick each next token. Defaults to
-                SamplingPolicy(), i.e. plain temperature-1.0 sampling.
-            device: Device to place encoded prompts on.
+                ``SamplingPolicy()``, i.e. plain temperature-1.0 sampling.
+            device: Device to place encoded prompts on. The model is expected
+                to already live on the same device.
 
         Raises:
-            KeyError: If a tokenizer is given but has no "<eos>" token.
+            KeyError: If a tokenizer is given but has no ``<eos>`` token.
         """
         self.model = model
         self.tokenizer = tokenizer
@@ -45,14 +55,24 @@ class TextGenerator:
     def generate_ids(self, idx: torch.Tensor, max_new_tokens: int) -> torch.Tensor:
         """Autoregressively extend a prompt, decoding incrementally with a KV cache.
 
+        Runs under ``torch.no_grad`` for efficiency. Fresh per-block KV caches
+        are created for the run, then the loop feeds the model one step at a
+        time: the newest sampled token becomes the next step's input, while the
+        KV caches accumulate the full context so past tokens are never
+        reprocessed. If an ``<eos>`` id is configured and every sequence in the
+        batch emits it, generation stops early before exhausting
+        ``max_new_tokens``.
+
         Args:
-            idx: Prompt token ids of shape (B, S).
-            max_new_tokens: Maximum number of new tokens to append.
+            idx: Prompt token ids of shape ``(B, S)``.
+            max_new_tokens: Maximum number of new tokens to append. The actual
+                output length may be shorter if the batch stops early on
+                ``<eos>``.
 
         Returns:
-            Token ids of shape (B, S + n_generated), the prompt followed by
-            the generated continuation. Generation stops early once every
-            sequence in the batch has emitted <eos>.
+            torch.Tensor: Token ids of shape ``(B, S + n_generated)``, the
+            prompt followed by the generated continuation. Identical to ``idx``
+            if no new token was produced.
         """
         self.model.eval()
         kv_caches = [KVCache() for _ in range(self.model.config.n_layers)]
@@ -75,12 +95,16 @@ class TextGenerator:
     def generate(self, prompt: str, max_new_tokens: int) -> str:
         """Generate a text continuation for a prompt.
 
+        Encodes the prompt, delegates to :meth:`generate_ids` for the
+        autoregressive loop, and decodes the resulting token ids back to a
+        string.
+
         Args:
             prompt: Text prompt to continue.
             max_new_tokens: Maximum number of new tokens to append.
 
         Returns:
-            The decoded prompt + generated continuation, as a string.
+            str: The decoded prompt plus generated continuation.
 
         Raises:
             ValueError: If this generator was built without a tokenizer.

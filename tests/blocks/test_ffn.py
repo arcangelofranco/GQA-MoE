@@ -17,7 +17,7 @@ INTERMEDIATE_SIZES = [256, 688, 512, 1376]
 @pytest.mark.parametrize("s", S_LENS)
 @pytest.mark.parametrize("b", B_SIZES)
 def test_shape(b: int, s: int, dim: int, inter: int) -> None:
-    """Checks that SwiGLU preserves the input shape.
+    """Verifies that SwiGLU preserves the input shape.
 
     Args:
         b: Batch size.
@@ -39,6 +39,9 @@ def test_shape(b: int, s: int, dim: int, inter: int) -> None:
 @pytest.mark.parametrize("dim", [256, 512])
 def test_gradients_flow(dim: int, inter: int) -> None:
     """Verifies that gradients reach every projection weight after backward.
+
+    A zero or missing gradient on any of the three projections would indicate
+    a broken connection that silently prevents learning.
 
     Args:
         dim: Model (input/output) dimension.
@@ -69,6 +72,9 @@ def test_gradients_flow(dim: int, inter: int) -> None:
 def test_init_nonconstant(dim: int, inter: int) -> None:
     """Ensures a freshly initialized SwiGLU does not produce an all-zero output.
 
+    Guards against degenerate initialization such as all-zero weights that
+    would make the layer a constant-zero function.
+
     Args:
         dim: Model (input/output) dimension.
         inter: Intermediate (hidden) dimension.
@@ -84,10 +90,11 @@ def test_init_nonconstant(dim: int, inter: int) -> None:
 @pytest.mark.parametrize("inter", [256, 688])
 @pytest.mark.parametrize("dim", [256, 512])
 def test_gate_effective(dim: int, inter: int) -> None:
-    """Checks that both the up and gate branches actually affect the output.
+    """Verifies that both the up and gate branches contribute to the output.
 
-    Disables the up branch (via a subclass) and separately zeroes the gate
-    weights, confirming each ablation changes the output as expected.
+    Removes the up branch (via a subclass) and separately zeroes the gate
+    weights, confirming each ablation changes the output as expected and that
+    the SiLU gate genuinely modulates the gated projection.
 
     Args:
         dim: Model (input/output) dimension.
@@ -120,10 +127,11 @@ def test_gate_effective(dim: int, inter: int) -> None:
 
 
 def test_experts_isolated_from_moe() -> None:
-    """Checks that independent SwiGLU experts combine into a finite, shape-correct output.
+    """Verifies standalone SwiGLU experts compose into a finite, shape-correct sum.
 
-    Simulates a naive (unrouted) MoE sum of several standalone experts to
-    confirm they compose without shape mismatches or NaN/Inf leakage.
+    Simulates an unrouted MoE by summing several independent experts, confirming
+    they combine without shape mismatches or NaN/Inf leakage before routing is
+    added.
     """
     dim, inter, n_experts = 256, 688, 4
     experts = nn.ModuleList([SwiGLU(dim, inter) for _ in range(n_experts)])

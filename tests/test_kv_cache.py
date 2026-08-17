@@ -4,7 +4,7 @@ from src.model.kv_cache import KVCache
 
 
 def test_initial_state_is_empty() -> None:
-    """Checks that a freshly created KVCache starts empty with no k/v tensors."""
+    """Verifies that a fresh :class:`KVCache` starts empty, before any token is decoded."""
     cache = KVCache()
     print(f"[initial] length={cache.length} k={cache.k} v={cache.v}")
     assert cache.length == 0
@@ -13,7 +13,7 @@ def test_initial_state_is_empty() -> None:
 
 
 def test_append_on_empty_assigns() -> None:
-    """Checks that appending to an empty cache assigns k/v directly and returns them."""
+    """Verifies that appending to an empty cache stores the tensors and returns them unchanged."""
     cache = KVCache()
     k = torch.randn(2, 3, 1, 8)
     v = torch.randn(2, 3, 1, 8)
@@ -30,7 +30,7 @@ def test_append_on_empty_assigns() -> None:
 
 
 def test_append_grows_and_concatenates() -> None:
-    """Checks that successive appends concatenate along the sequence dimension and grow length."""
+    """Verifies that successive appends concatenate along the sequence dimension, so attention sees all past tokens."""
     cache = KVCache()
     parts_k, parts_v = [], []
     for s in [1, 2, 4]:
@@ -49,7 +49,7 @@ def test_append_grows_and_concatenates() -> None:
 
 
 def test_append_preserves_dtype() -> None:
-    """Checks that appending bfloat16 tensors keeps the cache's k/v in bfloat16."""
+    """Verifies that appends do not silently upcast the cache tensors, keeping the expected dtype across steps."""
     cache = KVCache()
     k = torch.randn(2, 2, 1, 8, dtype=torch.bfloat16)
     v = torch.randn(2, 2, 1, 8, dtype=torch.bfloat16)
@@ -62,7 +62,7 @@ def test_append_preserves_dtype() -> None:
 
 
 def test_length_tracks_total_appended() -> None:
-    """Checks that cache.length always equals the running total of appended positions."""
+    """Verifies that the reported length always equals the running total of appended positions, regardless of chunk size."""
     cache = KVCache()
     total = 0
     for s in [5, 8, 3]:

@@ -25,13 +25,17 @@ They played together all afternoon and became best friends.
 
 @pytest.fixture(scope="module")
 def tiny_tokenizer(tmp_path_factory: pytest.TempPathFactory) -> Tokenizer:
-    """Trains a tiny BPE tokenizer on the toy corpus, shared across the module's tests.
+    """Train a tiny BPE tokenizer once and share it across the module's tests.
+
+    Training a real tokenizer is the slowest fixture in this module, so it is
+    scoped to the module and reused by every test instead of being rebuilt per
+    test.
 
     Args:
         tmp_path_factory: Pytest factory for a session-scoped temp directory.
 
     Returns:
-        A `Tokenizer` loaded from the freshly trained vocab.
+        Tokenizer: A :class:`Tokenizer` loaded from the freshly trained vocab.
     """
     tmp_dir = tmp_path_factory.mktemp("data_tok")
     corpus_path = tmp_dir / "corpus.txt"
@@ -42,7 +46,11 @@ def tiny_tokenizer(tmp_path_factory: pytest.TempPathFactory) -> Tokenizer:
 
 
 def test_encode_corpus_to_bin_count_and_range(tmp_path: Path, tiny_tokenizer: Tokenizer) -> None:
-    """Checks that encode_corpus_to_bin writes exactly n ids, all within the vocab range.
+    """Verify encode_corpus_to_bin writes the reported count of in-vocab ids.
+
+    The returned token count must match the bytes on disk exactly, and every id
+    must lie inside ``[0, vocab_size)`` so the downstream model never indexes
+    outside its embedding table.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -63,7 +71,11 @@ def test_encode_corpus_to_bin_count_and_range(tmp_path: Path, tiny_tokenizer: To
 def test_encode_corpus_to_bin_inserts_eos_between_stories(
     tmp_path: Path, tiny_tokenizer: Tokenizer
 ) -> None:
-    """Checks that encode_corpus_to_bin inserts one <eos> per line, with the last at file end.
+    """Verify encode_corpus_to_bin inserts one <eos> per line, with the last at file end.
+
+    Each story must be terminated exactly once so the model learns sequence
+    boundaries; this also pins that the very last token of the file is the
+    final ``<eos>`` and that interior terminators sit mid-file.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -86,7 +98,11 @@ def test_encode_corpus_to_bin_inserts_eos_between_stories(
 
 
 def test_encode_corpus_to_bin_skips_blank_lines(tmp_path: Path, tiny_tokenizer: Tokenizer) -> None:
-    """Checks that blank lines are skipped and do not each get their own <eos>.
+    """Verify that blank lines are skipped and do not each get their own <eos>.
+
+    Empty lines carry no content, so emitting an ``<eos>`` per physical blank
+    line would inject spurious sequence boundaries into the corpus. Only the
+    non-blank stories may be terminated.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -106,8 +122,66 @@ def test_encode_corpus_to_bin_skips_blank_lines(tmp_path: Path, tiny_tokenizer: 
     assert eos_count == 2
 
 
+def test_encode_corpus_to_bin_output_is_independent_of_batch_lines(
+    tmp_path: Path, tiny_tokenizer: Tokenizer
+) -> None:
+    """Verify batch_lines tunes memory only, never the bytes written.
+
+    Encoding streams batch by batch, so the batch size decides how much is held
+    in memory at once. It must not become part of the output contract: the same
+    corpus has to produce byte-identical bins at any batch size.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+        tiny_tokenizer: Shared tiny tokenizer fixture.
+    """
+    corpus_path = tmp_path / "corpus.txt"
+    corpus_path.write_text(CORPUS_TEXT)
+
+    outputs = {}
+    for batch_lines in (1, 2, 7, 10_000):
+        bin_path = tmp_path / f"out_{batch_lines}.bin"
+        n = encode_corpus_to_bin(
+            str(corpus_path), tiny_tokenizer, str(bin_path), batch_lines=batch_lines
+        )
+        outputs[batch_lines] = (n, bin_path.read_bytes())
+
+    counts = {bl: n for bl, (n, _) in outputs.items()}
+    print(f"[batch-invariance] token_counts={counts}")
+    assert len(set(counts.values())) == 1
+    assert len({payload for _, payload in outputs.values()}) == 1
+
+
+def test_encode_corpus_to_bin_writes_an_empty_file_for_a_blank_corpus(
+    tmp_path: Path, tiny_tokenizer: Tokenizer
+) -> None:
+    """Verify a corpus with no usable lines yields a genuinely empty file.
+
+    A corpus that produces no tokens must produce a zero-length file, not a
+    partially written one: a file whose size is not a whole number of elements
+    could not be memory-mapped back as a token array.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+        tiny_tokenizer: Shared tiny tokenizer fixture.
+    """
+    corpus_path = tmp_path / "blank.txt"
+    corpus_path.write_text("\n\n\n")
+    bin_path = tmp_path / "blank.bin"
+
+    n = encode_corpus_to_bin(str(corpus_path), tiny_tokenizer, str(bin_path))
+
+    print(f"[blank-corpus] n={n} size={bin_path.stat().st_size}")
+    assert n == 0
+    assert bin_path.stat().st_size == 0
+
+
 def test_iter_line_batches_groups_by_threshold(tmp_path: Path) -> None:
-    """Checks that iter_line_batches groups lines into batches capped at batch_lines.
+    """Verify iter_line_batches caps batches at batch_lines and keeps order.
+
+    The batching policy feeds encoding: full batches are capped at
+    ``batch_lines``, the final partial batch is still yielded, and the original
+    file order is preserved end to end.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -124,7 +198,10 @@ def test_iter_line_batches_groups_by_threshold(tmp_path: Path) -> None:
 
 
 def test_iter_line_batches_skips_blank_lines(tmp_path: Path) -> None:
-    """Checks that iter_line_batches drops blank lines from the batches.
+    """Verify iter_line_batches drops blank lines from the batches.
+
+    Empty lines must be filtered before batching, so downstream encoding never
+    sees placeholder entries that would otherwise produce empty token lists.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -138,7 +215,11 @@ def test_iter_line_batches_skips_blank_lines(tmp_path: Path) -> None:
 
 
 def test_iter_line_batches_empty_or_all_blank(tmp_path: Path) -> None:
-    """Checks that an empty or all-blank corpus yields no batches.
+    """Verify that an empty or all-blank corpus yields no batches.
+
+    A corpus with nothing to encode must produce zero batches rather than an
+    empty batch, which would otherwise surface as an odd one-token artifact in
+    the encoded output.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -153,7 +234,11 @@ def test_iter_line_batches_empty_or_all_blank(tmp_path: Path) -> None:
 
 
 def test_encode_corpus_to_bin_feeds_real_batches(tmp_path: Path, tiny_tokenizer: Tokenizer) -> None:
-    """Checks that encode_corpus_to_bin calls encode_batch with correctly sized batches.
+    """Verify encode_corpus_to_bin feeds encode_batch correctly sized batches.
+
+    Uses a spy to confirm the batched encoding path receives batches capped at
+    ``batch_lines`` (``[2, 2, 1]``), not the raw line stream: the batching
+    layer must actually drive the tokenizer's batch API.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -171,7 +256,11 @@ def test_encode_corpus_to_bin_feeds_real_batches(tmp_path: Path, tiny_tokenizer:
 
 
 def test_download_corpus_skips_if_already_present(tmp_path: Path) -> None:
-    """Checks that download_corpus is a no-op when the output file already exists.
+    """Verify download_corpus is a no-op when the output file already exists.
+
+    Pins the idempotency of the data pipeline: a re-run must not re-fetch the
+    corpus from the network nor overwrite the existing file, or repeated
+    invocations would waste bandwidth and break reproducibility.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -189,7 +278,11 @@ def test_download_corpus_skips_if_already_present(tmp_path: Path) -> None:
 
 
 def test_download_corpus_writes_one_story_per_line(tmp_path: Path) -> None:
-    """Checks that download_corpus writes one story per line, collapsing internal newlines.
+    """Verify download_corpus writes one story per line, collapsing internal newlines.
+
+    The corpus format contract is one story per line with internal newlines
+    flattened to spaces and blank stories dropped; the tokenizer training and
+    batching layers both depend on this exact shape.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -215,7 +308,11 @@ def test_download_corpus_writes_one_story_per_line(tmp_path: Path) -> None:
 
 
 def test_prepare_data_end_to_end_with_local_corpus(tmp_path: Path) -> None:
-    """Checks that prepare_data runs end-to-end on a local corpus and writes valid outputs.
+    """Verify prepare_data runs end-to-end on a local corpus and writes valid outputs.
+
+    Exercises the whole offline pipeline (skip-download, tokenizer training,
+    encoding, metadata) against pre-seeded local corpora, checking that the
+    produced bins and ``meta.json`` are consistent and self-describing.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -245,7 +342,11 @@ def test_prepare_data_end_to_end_with_local_corpus(tmp_path: Path) -> None:
 
 
 def test_prepare_data_does_not_retrain_tokenizer_if_present(tmp_path: Path) -> None:
-    """Checks that a second prepare_data call reuses an existing tokenizer instead of retraining.
+    """Verify prepare_data reuses an existing tokenizer instead of retraining.
+
+    Tokenizer training is the most expensive step of the pipeline, so a second
+    invocation must leave ``vocab.json`` untouched (checked via its mtime).
+    Otherwise every re-run would silently retrain and change the vocabulary.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -266,16 +367,56 @@ def test_prepare_data_does_not_retrain_tokenizer_if_present(tmp_path: Path) -> N
     assert vocab_mtime_1 == vocab_mtime_2  # not retrained the second time
 
 
-@pytest.fixture
-def bin_dataset(tmp_path: Path, tiny_tokenizer: Tokenizer) -> BinDataset:
-    """Builds a small BinDataset with encoded train/val splits for get_batch tests.
+def test_prepare_data_still_encodes_when_tokenizer_already_exists(tmp_path: Path) -> None:
+    """Verify reusing a tokenizer does not skip encoding and metadata writing.
+
+    Skipping tokenizer training must not skip the rest of the pipeline: a
+    re-run pointed at a fresh ``bin_dir`` still has to encode both corpora and
+    write ``meta.json``, otherwise the run silently produces nothing and
+    training later fails on a missing dataset.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
-        tiny_tokenizer: Shared tiny tokenizer fixture.
+    """
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "train.txt").write_text(CORPUS_TEXT)
+    (raw_dir / "valid.txt").write_text("Tom liked the dog.\n" * 5)
+    tokenizer_dir = tmp_path / "tokenizer"
+
+    prepare_data(str(raw_dir), str(tokenizer_dir), str(tmp_path / "bin1"), vocab_size=300)
+
+    second_bin_dir = tmp_path / "bin2"
+    prepare_data(str(raw_dir), str(tokenizer_dir), str(second_bin_dir), vocab_size=300)
+
+    with open(second_bin_dir / "meta.json") as f:
+        meta = json.load(f)
+    print(f"[reuse-tokenizer] meta={meta}")
+    assert (second_bin_dir / "train.bin").exists()
+    assert (second_bin_dir / "val.bin").exists()
+    assert meta["train_tokens"] > 0
+    assert meta["val_tokens"] > 0
+
+    # The reused tokenizer must produce byte-identical bins, not just any bins.
+    for name in ("train.bin", "val.bin"):
+        assert (tmp_path / "bin1" / name).read_bytes() == (second_bin_dir / name).read_bytes()
+
+
+def _encode_bin_dir(tmp_path: Path, tokenizer: Tokenizer) -> Path:
+    """Encode the toy corpus into a complete, loadable dataset directory.
+
+    Produces the three files :class:`BinDataset` expects — ``train.bin``,
+    ``val.bin``, and ``meta.json`` — from the shared toy corpus. The ``dtype``
+    is written as a literal rather than derived from the production helper, so
+    these tests keep asserting against a fixed expectation instead of against
+    whatever the encoder currently computes.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory to build the dataset in.
+        tokenizer: Tokenizer used to encode both splits.
 
     Returns:
-        A `BinDataset` backed by freshly encoded train.bin/val.bin.
+        Path: The ``bin_dir`` holding the encoded splits and their metadata.
     """
     train_path = tmp_path / "train.txt"
     val_path = tmp_path / "val.txt"
@@ -284,19 +425,41 @@ def bin_dataset(tmp_path: Path, tiny_tokenizer: Tokenizer) -> BinDataset:
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    n_train = encode_corpus_to_bin(str(train_path), tiny_tokenizer, str(bin_dir / "train.bin"))
-    n_val = encode_corpus_to_bin(str(val_path), tiny_tokenizer, str(bin_dir / "val.bin"))
+    n_train = encode_corpus_to_bin(str(train_path), tokenizer, str(bin_dir / "train.bin"))
+    n_val = encode_corpus_to_bin(str(val_path), tokenizer, str(bin_dir / "val.bin"))
 
-    meta = {"vocab_size": tiny_tokenizer.get_vocab_size(), "dtype": "uint16",
+    meta = {"vocab_size": tokenizer.get_vocab_size(), "dtype": "uint16",
             "train_tokens": n_train, "val_tokens": n_val}
     with open(bin_dir / "meta.json", "w") as f:
         json.dump(meta, f)
 
-    return BinDataset(str(bin_dir))
+    return bin_dir
+
+
+@pytest.fixture
+def bin_dataset(tmp_path: Path, tiny_tokenizer: Tokenizer) -> BinDataset:
+    """Build a small BinDataset with encoded splits for the get_batch tests.
+
+    Encodes the toy corpus into real ``train.bin``/``val.bin`` files and wraps
+    them in a :class:`BinDataset`, providing an isolated dataset for every
+    ``get_batch`` test without repeating the encoding boilerplate.
+
+    Args:
+        tmp_path: Pytest-provided temporary directory.
+        tiny_tokenizer: Shared tiny tokenizer fixture.
+
+    Returns:
+        BinDataset: A dataset backed by freshly encoded train/val bins.
+    """
+    return BinDataset(str(_encode_bin_dir(tmp_path, tiny_tokenizer)))
 
 
 def test_get_batch_shapes_and_dtype(bin_dataset: BinDataset) -> None:
-    """Checks that get_batch returns int64 tensors shaped (batch_size, block_size).
+    """Verify get_batch returns int64 tensors shaped (batch_size, block_size).
+
+    Both the dtype (int64, required by ``nn.Embedding``) and the exact
+    batch/sequence geometry are part of the training data contract and must not
+    drift.
 
     Args:
         bin_dataset: Small BinDataset fixture.
@@ -310,7 +473,10 @@ def test_get_batch_shapes_and_dtype(bin_dataset: BinDataset) -> None:
 
 
 def test_get_batch_indices_in_vocab_range(bin_dataset: BinDataset, tiny_tokenizer: Tokenizer) -> None:
-    """Checks that get_batch's returned ids stay within [0, vocab_size).
+    """Verify get_batch's returned ids stay within [0, vocab_size).
+
+    Sampled ids outside the embedding table would crash training on the first
+    lookup; this guards the range invariant for both inputs and targets.
 
     Args:
         bin_dataset: Small BinDataset fixture.
@@ -325,27 +491,30 @@ def test_get_batch_indices_in_vocab_range(bin_dataset: BinDataset, tiny_tokenize
 class _FixedRNG:
     """Fake RNG that always returns the same fixed index array.
 
-    Lets `get_batch` be driven to a deterministic, known sampling
-    position instead of a random one.
+    Lets ``get_batch`` be driven to a deterministic, known sampling position
+    instead of a random one, which is required to assert the exact shift
+    relationship between inputs and targets.
     """
 
     def __init__(self, fixed_idx: np.ndarray):
-        """Stores the index array to always return.
+        """Store the index array to always return.
 
         Args:
-            fixed_idx: Array returned unconditionally by `integers`.
+            fixed_idx: Array returned unconditionally by ``integers``.
         """
         self._fixed_idx = fixed_idx
 
     def integers(self, *args, **kwargs) -> np.ndarray:
-        """Returns the fixed index array regardless of the requested range.
+        """Return the fixed index array regardless of the requested range.
 
         Args:
-            *args: Ignored; present to match `numpy.random.Generator.integers`.
-            **kwargs: Ignored; present to match `numpy.random.Generator.integers`.
+            *args: Ignored; present to match
+                ``numpy.random.Generator.integers``.
+            **kwargs: Ignored; present to match
+                ``numpy.random.Generator.integers``.
 
         Returns:
-            The configured fixed index array.
+            np.ndarray: The configured fixed index array.
         """
         return self._fixed_idx
 
@@ -353,7 +522,11 @@ class _FixedRNG:
 def test_get_batch_y_is_x_shifted_by_one(
     bin_dataset: BinDataset, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Checks that y is exactly x shifted one position ahead in the underlying data.
+    """Verify that y is exactly x shifted one position ahead in the underlying data.
+
+    Uses a deterministic RNG stub to pin the sampling offset, then checks the
+    windowed slices byte-for-byte against the source array. This pins the
+    next-token prediction contract that the loss function relies on.
 
     Args:
         bin_dataset: Small BinDataset fixture.
@@ -373,7 +546,10 @@ def test_get_batch_y_is_x_shifted_by_one(
 
 
 def test_get_batch_unknown_split_raises(bin_dataset: BinDataset) -> None:
-    """Checks that requesting an unknown split name raises ValueError.
+    """Verify that requesting an unknown split name raises ValueError.
+
+    A typo in the split name must fail with a clear error instead of silently
+    reading from an unexpected split or crashing on a missing memmap.
 
     Args:
         bin_dataset: Small BinDataset fixture.
@@ -384,7 +560,11 @@ def test_get_batch_unknown_split_raises(bin_dataset: BinDataset) -> None:
 
 
 def test_get_batch_block_size_too_large_raises(bin_dataset: BinDataset) -> None:
-    """Checks that a block_size larger than the split's data raises ValueError.
+    """Verify that a block_size larger than the split's data raises ValueError.
+
+    A window longer than the available tokens cannot be sliced; the dataset
+    must reject it up front with an informative error rather than returning
+    undersized or empty sequences.
 
     Args:
         bin_dataset: Small BinDataset fixture.
@@ -396,25 +576,17 @@ def test_get_batch_block_size_too_large_raises(bin_dataset: BinDataset) -> None:
 
 
 def test_get_batch_same_seed_reproduces_train_sequence(tmp_path: Path, tiny_tokenizer: Tokenizer) -> None:
-    """Checks that two datasets built with the same seed draw identical train batches.
+    """Verify that two datasets built with the same seed draw identical batches.
+
+    Reproducibility depends on the seed reaching the sampling RNGs; two
+    datasets seeded identically must produce bit-identical training batches so
+    runs can be compared or replayed deterministically.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
         tiny_tokenizer: Shared tiny tokenizer fixture.
     """
-    train_path = tmp_path / "train.txt"
-    val_path = tmp_path / "val.txt"
-    train_path.write_text(CORPUS_TEXT)
-    val_path.write_text("Tom liked the dog very much indeed every single day.\n" * 5)
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    n_train = encode_corpus_to_bin(str(train_path), tiny_tokenizer, str(bin_dir / "train.bin"))
-    n_val = encode_corpus_to_bin(str(val_path), tiny_tokenizer, str(bin_dir / "val.bin"))
-    meta = {"vocab_size": tiny_tokenizer.get_vocab_size(), "dtype": "uint16",
-            "train_tokens": n_train, "val_tokens": n_val}
-    with open(bin_dir / "meta.json", "w") as f:
-        json.dump(meta, f)
+    bin_dir = _encode_bin_dir(tmp_path, tiny_tokenizer)
 
     ds_a = BinDataset(str(bin_dir), seed=42)
     ds_b = BinDataset(str(bin_dir), seed=42)
@@ -427,25 +599,17 @@ def test_get_batch_same_seed_reproduces_train_sequence(tmp_path: Path, tiny_toke
 
 
 def test_get_batch_val_calls_do_not_perturb_train_sequence(tmp_path: Path, tiny_tokenizer: Tokenizer) -> None:
-    """Checks that calling get_batch("val", ...) does not perturb the train split's RNG sequence.
+    """Verify val sampling never perturbs the train split's RNG sequence.
+
+    Validation runs interleave with training, so the two RNG streams must be
+    fully independent: the training batch order cannot depend on how often or
+    when validation batches are drawn.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
         tiny_tokenizer: Shared tiny tokenizer fixture.
     """
-    train_path = tmp_path / "train.txt"
-    val_path = tmp_path / "val.txt"
-    train_path.write_text(CORPUS_TEXT)
-    val_path.write_text("Tom liked the dog very much indeed every single day.\n" * 5)
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    n_train = encode_corpus_to_bin(str(train_path), tiny_tokenizer, str(bin_dir / "train.bin"))
-    n_val = encode_corpus_to_bin(str(val_path), tiny_tokenizer, str(bin_dir / "val.bin"))
-    meta = {"vocab_size": tiny_tokenizer.get_vocab_size(), "dtype": "uint16",
-            "train_tokens": n_train, "val_tokens": n_val}
-    with open(bin_dir / "meta.json", "w") as f:
-        json.dump(meta, f)
+    bin_dir = _encode_bin_dir(tmp_path, tiny_tokenizer)
 
     ds_sparse_eval = BinDataset(str(bin_dir), seed=7)
     ds_dense_eval = BinDataset(str(bin_dir), seed=7)

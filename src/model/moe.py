@@ -8,16 +8,25 @@ from src.model.blocks.ffn import SwiGLU
 class MoELayer(nn.Module):
     """Sparse mixture-of-experts feed-forward layer with a shared expert.
 
-    Each token is routed to its top_k highest-scoring experts (out of
-    n_experts), plus a shared expert that always processes every token.
+    Implements a sparse MoE following the Switch/DeepSeek-style design: a small
+    learned router scores every token against all ``n_experts``, and each token
+    is dispatched to its ``top_k`` highest-scoring experts only. A dedicated
+    shared expert additionally processes every token unconditionally, which
+    acts as a dense "anchor" pathway that preserves stable gradients and
+    prevents the router from over-specializing.
+
+    The per-token expert outputs are weighted by the normalized top-k routing
+    probabilities, so the module behaves like a mixture while only paying for
+    ``top_k + 1`` experts per token.
     """
 
     def __init__(self, config: ModelConfig):
         """Build the router, the routed experts, and the shared expert.
 
         Args:
-            config: Model configuration; uses hidden_dim, n_experts, top_k,
-                expert_intermediate, and shared_intermediate.
+            config: Model configuration. Consumes ``hidden_dim``,
+                ``n_experts``, ``top_k``, ``expert_intermediate``, and
+                ``shared_intermediate``.
         """
         super().__init__()
         self.n_experts = config.n_experts
@@ -33,12 +42,21 @@ class MoELayer(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Route tokens to experts and combine with the shared expert's output.
 
+        Flattens the sequence into per-token vectors, computes softmax routing
+        probabilities, selects the ``top_k`` experts per token, renormalizes
+        the selected weights, and accumulates each expert's gated contribution
+        into the token's output. The shared expert's output is then added to
+        every token. The load-balancing auxiliary loss is only computed and
+        returned during training; in eval mode it is a constant zero so that
+        inference returns a valid but inert scalar.
+
         Args:
-            x: Input tensor of shape (B, S, hidden_dim).
+            x: Input tensor of shape ``(B, S, hidden_dim)``.
 
         Returns:
-            A tuple (output, aux_loss): output has shape (B, S, hidden_dim);
-            aux_loss is the load-balancing loss (0.0 tensor in eval mode).
+            tuple[torch.Tensor, torch.Tensor]: A pair ``(output, aux_loss)``
+            where ``output`` has shape ``(B, S, hidden_dim)`` and ``aux_loss``
+            is the load-balancing loss (a scalar tensor, ``0.0`` in eval mode).
         """
         B, S, H = x.shape
         x_flat = x.reshape(-1, H) # (N, H), N = B*S
@@ -80,13 +98,25 @@ class MoELayer(nn.Module):
     ) -> torch.Tensor:
         """Compute the Switch Transformer-style auxiliary load-balancing loss.
 
+        Penalizes routing skew: if the fraction of tokens dispatched to an
+        expert (measured from the actual discrete assignments) diverges from
+        the fraction of routing probability mass that expert receives, the loss
+        grows. Minimizing it encourages uniform expert utilization and prevents
+        the router from collapsing onto a few experts.
+
+        The token-count term is computed under ``no_grad`` because it depends
+        only on the discrete assignments, which are non-differentiable; only
+        the probability term contributes to the gradient.
+
         Args:
-            router_probs: Softmax router probabilities of shape (N, n_experts).
-            top_index: Indices of the top_k selected experts, shape (N, top_k).
-            device: Device to allocate intermediate tensors on.
+            router_probs: Softmax router probabilities of shape
+                ``(N, n_experts)``, one distribution per token.
+            top_index: Indices of the ``top_k`` selected experts, shape
+                ``(N, top_k)``.
+            device: Device to allocate the intermediate count tensors on.
 
         Returns:
-            Scalar auxiliary loss tensor.
+            torch.Tensor: A scalar auxiliary loss tensor (zero-dim).
         """
         with torch.no_grad():
             tokens_per_expert = torch.zeros(self.n_experts, device=device)

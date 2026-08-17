@@ -79,7 +79,11 @@ def test_smoke_sampled_generates_requested_number_of_tokens() -> None:
 
 
 def test_zero_new_tokens_returns_prompt_unchanged_without_calling_model() -> None:
-    """Checks that requesting 0 new tokens returns the prompt unchanged."""
+    """Checks that requesting zero new tokens returns the prompt unchanged.
+
+    This exercises the early return of generate_ids() with an empty
+    generation, before any sampling happens.
+    """
     model, cfg, idx = _tiny_model_and_prompt()
     out = _generator(model, temperature=0.0).generate_ids(idx, max_new_tokens=0)
     print(f"[zero-tokens] prompt.shape={tuple(idx.shape)} -> out.shape={tuple(out.shape)} equal={torch.equal(out, idx)}")
@@ -197,7 +201,11 @@ class _FakeTokenizer:
 
 
 def test_generation_stops_early_when_eos_id_is_emitted() -> None:
-    """Checks that generation stops as soon as the eos id is forced."""
+    """Checks that generation stops as soon as the eos id is forced.
+
+    Verifies the model is not called again once <eos> is produced and that
+    the emitted sequence ends with that eos token.
+    """
     model = _ForcedTokenModel(forced_ids=[7, 2, 2, 2, 2], vocab_size=10)
     idx = torch.tensor([[1, 1, 1]])
     generator = _generator(model, tokenizer=_FakeTokenizer(eos_id=7), temperature=0.0)
@@ -213,7 +221,11 @@ def test_generation_stops_early_when_eos_id_is_emitted() -> None:
 
 
 def test_generation_runs_full_length_without_eos_id() -> None:
-    """Checks that generation runs the full length when there is no tokenizer to stop on."""
+    """Checks that generation runs the full length when there is no tokenizer to stop on.
+
+    Verifies every requested token is produced and the model is called once
+    per step when no <eos> is available to trigger an early exit.
+    """
     model = _ForcedTokenModel(forced_ids=[7, 7, 7, 7, 7], vocab_size=10)
     idx = torch.tensor([[1, 1, 1]])
     # no tokenizer => no <eos> => no early exit
@@ -224,9 +236,11 @@ def test_generation_runs_full_length_without_eos_id() -> None:
 
 
 def test_generate_without_tokenizer_is_refused() -> None:
-    """Checks that the text-decoding path raises ValueError up front without a tokenizer."""
-    # the text path needs a tokenizer: it must say so immediately and
-    # explicitly, rather than failing later with an AttributeError.
+    """Checks that the text-decoding path raises ValueError up front without a tokenizer.
+
+    The text path needs a tokenizer: it must say so immediately and
+    explicitly, rather than failing later with an AttributeError.
+    """
     model, _, _ = _tiny_model_and_prompt()
     with pytest.raises(ValueError, match="tokenizer") as exc_info:
         _generator(model, temperature=0.0).generate("Once upon a time,", max_new_tokens=5)

@@ -8,13 +8,30 @@ from src.model.blocks.rope import apply_rope
 from src.model.kv_cache import KVCache
 
 class GQAttention(nn.Module):
-    """Grouped-Query Attention with QK-Norm, RoPE, and optional KV caching."""
+    """Grouped-Query Attention with QK-Norm, RoPE, and optional KV caching.
+
+    Implements grouped-query attention (GQA), where a single key/value head is
+    shared across a group of ``n_rep = n_heads // n_kv_heads`` query heads. This
+    cuts the memory footprint of the KV cache and the KV compute cost by a
+    factor of ``n_rep`` while retaining most of the quality of full MHA.
+
+    Keys and queries are normalized with per-head RMSNorm (QK-Norm) before
+    rotary position embeddings are applied; the values are left unnormalized.
+    The module supports both the batched training path (causal masking, no
+    cache) and incremental autoregressive decoding through an optional
+    :class:`KVCache`.
+    """
 
     def __init__(self, config: ModelConfig):
-        """Build the projections and QK-Norm layers.
+        """Build the Q/K/V/O projections and the QK-Norm layers.
 
         Args:
-            config: Model configuration; uses hidden_dim, n_heads, n_kv_heads, head_dim, and rms_norm_eps.
+            config: Model configuration. Consumes ``hidden_dim``, ``n_heads``,
+                ``n_kv_heads``, ``head_dim``, and ``rms_norm_eps``.
+
+        Raises:
+            AssertionError: If ``n_heads`` is not a multiple of ``n_kv_heads``,
+                which is a structural requirement of grouped-query attention.
         """
         super().__init__()
 
@@ -43,17 +60,31 @@ class GQAttention(nn.Module):
     ) -> tuple[torch.Tensor, KVCache | None]:
         """Run grouped-query self-attention over a (possibly incremental) sequence.
 
+        Computes Q/K/V projections, applies QK-Norm and RoPE, appends to the
+        KV cache when provided, then runs scaled dot-product attention. When a
+        non-empty cache is present, the sequence is treated as a continuation
+        at absolute positions ``[cache_len, cache_len + S)`` and a truncated
+        causal mask lets each new token attend to itself and all cached tokens.
+        Otherwise a full causal mask is applied natively by
+        :func:`torch.nn.functional.scaled_dot_product_attention`.
+
         Args:
-            x: Input tensor of shape (B, S, hidden_dim).
-            cos: RoPE cosine table of shape (max_seq_len, head_dim).
-            sin: RoPE sine table of shape (max_seq_len, head_dim).
-            kv_cache: Optional KV cache to read the position offset from and
-                append the new keys/values to. None during training/prefill
-                without caching.
+            x: Input tensor of shape ``(B, S, hidden_dim)``.
+            cos: RoPE cosine table of shape ``(max_seq_len, head_dim)``.
+            sin: RoPE sine table of shape ``(max_seq_len, head_dim)``.
+            kv_cache: Optional :class:`KVCache`. When ``None`` (training or
+                cache-free prefill) the position offset is zero and no
+                append happens.
 
         Returns:
-            A tuple (output, kv_cache): output has shape (B, S, hidden_dim);
-            kv_cache is the same object passed in (or None), updated in place.
+            tuple[torch.Tensor, KVCache | None]: A pair ``(output, kv_cache)``
+            where ``output`` has shape ``(B, S, hidden_dim)`` and ``kv_cache``
+            is the same object passed in (or ``None``), updated in place with
+            the new keys and values.
+
+        Raises:
+            RuntimeError: If ``max_seq_len`` precomputed for the RoPE tables is
+                shorter than ``cache_len + S``.
         """
         B, S, _ = x.shape
 

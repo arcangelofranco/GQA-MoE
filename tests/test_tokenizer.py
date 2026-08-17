@@ -17,13 +17,16 @@ The sun was warm and the grass was green and soft.
 
 @pytest.fixture(scope="module")
 def tiny_tokenizer(tmp_path_factory: pytest.TempPathFactory) -> Tokenizer:
-    """Trains a tiny BPE tokenizer on the toy corpus, shared across the module's tests.
+    """Trains a small BPE tokenizer on the toy corpus, shared across the module's tests.
+
+    Training once per module keeps the tests fast while still exercising the
+    real :func:`train_bpe` pipeline.
 
     Args:
         tmp_path_factory: Pytest factory for a session-scoped temp directory.
 
     Returns:
-        A `Tokenizer` loaded from the freshly trained vocab.
+        A :class:`Tokenizer` loaded from the freshly trained vocab.
     """
     tmp_dir = tmp_path_factory.mktemp("tok")
     corpus_path = tmp_dir / "corpus.txt"
@@ -34,7 +37,10 @@ def tiny_tokenizer(tmp_path_factory: pytest.TempPathFactory) -> Tokenizer:
 
 
 def test_vocab_size_matches_requested(tiny_tokenizer: Tokenizer) -> None:
-    """Checks that the trained tokenizer's vocab size matches the requested one.
+    """Verifies that the trained vocabulary respects the requested size.
+
+    Guards against off-by-one errors in the BPE merge count, which would leave
+    the vocab undersized or oversized relative to what the model config expects.
 
     Args:
         tiny_tokenizer: Shared tiny tokenizer fixture.
@@ -50,7 +56,10 @@ def test_vocab_size_matches_requested(tiny_tokenizer: Tokenizer) -> None:
     "Spot, Tom, and the ball -- all together?",
 ])
 def test_roundtrip(tiny_tokenizer: Tokenizer, sentence: str) -> None:
-    """Checks that encode() followed by decode() reproduces the original sentence.
+    """Verifies that ``encode()`` followed by ``decode()`` reproduces the original sentence.
+
+    Round-tripping is the core correctness contract of a tokenizer: losses here
+    would corrupt any text the model generates or consumes.
 
     Args:
         tiny_tokenizer: Shared tiny tokenizer fixture.
@@ -63,7 +72,10 @@ def test_roundtrip(tiny_tokenizer: Tokenizer, sentence: str) -> None:
 
 
 def test_encode_batch_matches_encode_one_by_one(tiny_tokenizer: Tokenizer) -> None:
-    """Checks that encode_batch's output matches calling encode() on each sentence individually.
+    """Verifies that ``encode_batch()`` is consistent with calling ``encode()`` per sentence.
+
+    Batch encoding is a convenience path; it must not silently reorder or
+    re-tokenize the input sentences differently than the one-by-one path.
 
     Args:
         tiny_tokenizer: Shared tiny tokenizer fixture.
@@ -76,7 +88,10 @@ def test_encode_batch_matches_encode_one_by_one(tiny_tokenizer: Tokenizer) -> No
 
 
 def test_special_tokens_present(tiny_tokenizer: Tokenizer) -> None:
-    """Checks that all expected special tokens resolve to an id without raising.
+    """Verifies that all expected special tokens resolve to an id without raising.
+
+    Special tokens are required by training and inference pipelines, so a vocab
+    missing any of them would break padding, masking, and sequence boundaries.
 
     Args:
         tiny_tokenizer: Shared tiny tokenizer fixture.
@@ -87,7 +102,10 @@ def test_special_tokens_present(tiny_tokenizer: Tokenizer) -> None:
 
 
 def test_decode_strips_special_tokens(tiny_tokenizer: Tokenizer) -> None:
-    """Checks that decode() omits special tokens like <eos> from the output text.
+    """Verifies that ``decode()`` omits special tokens such as ``<eos>`` from the output.
+
+    Leaking special tokens into generated text would pollute user-facing output,
+    so decoding must filter them out.
 
     Args:
         tiny_tokenizer: Shared tiny tokenizer fixture.
@@ -100,10 +118,16 @@ def test_decode_strips_special_tokens(tiny_tokenizer: Tokenizer) -> None:
 
 
 def test_unknown_special_token_raises_key_error(tiny_tokenizer: Tokenizer) -> None:
-    """Checks that resolving an unregistered special token raises KeyError.
+    """Verifies that resolving an unregistered special token raises ``KeyError``.
+
+    Failing loudly on unknown tokens prevents silent mis-tokenization that would
+    otherwise be hard to trace in a trained model.
 
     Args:
         tiny_tokenizer: Shared tiny tokenizer fixture.
+
+    Raises:
+        KeyError: As expected when querying an unknown token.
     """
     with pytest.raises(KeyError) as exc_info:
         tiny_tokenizer.token_to_id("<not_a_real_token>")
@@ -111,7 +135,10 @@ def test_unknown_special_token_raises_key_error(tiny_tokenizer: Tokenizer) -> No
 
 
 def test_reloaded_tokenizer_matches_freshly_trained(tmp_path: Path) -> None:
-    """Checks that reloading a saved tokenizer from disk encodes identically to the original.
+    """Verifies that reloading a saved tokenizer from disk encodes identically to the original.
+
+    Deterministic round-tripping across reloads is required so a tokenizer
+    trained once can be persisted and reused consistently by later processes.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
@@ -131,10 +158,16 @@ def test_reloaded_tokenizer_matches_freshly_trained(tmp_path: Path) -> None:
 
 
 def test_missing_tokenizer_dir_raises_clear_error(tmp_path: Path) -> None:
-    """Checks that loading a tokenizer from a nonexistent directory raises FileNotFoundError.
+    """Verifies that loading a tokenizer from a nonexistent directory raises ``FileNotFoundError``.
+
+    A clear early error helps users detect stale or misconfigured model paths
+    instead of failing later with a confusing state.
 
     Args:
         tmp_path: Pytest-provided temporary directory.
+
+    Raises:
+        FileNotFoundError: As expected when the tokenizer directory is missing.
     """
     with pytest.raises(FileNotFoundError) as exc_info:
         Tokenizer(str(tmp_path / "does_not_exist"))
@@ -142,7 +175,10 @@ def test_missing_tokenizer_dir_raises_clear_error(tmp_path: Path) -> None:
 
 
 def test_compression_beats_char_level(tiny_tokenizer: Tokenizer) -> None:
-    """Checks that BPE encoding uses meaningfully fewer tokens than characters.
+    """Verifies that BPE encoding uses meaningfully fewer tokens than characters.
+
+    Compression below the character level is the whole point of BPE: without it
+    the tokenizer would not shorten sequences for the transformer.
 
     Args:
         tiny_tokenizer: Shared tiny tokenizer fixture.
