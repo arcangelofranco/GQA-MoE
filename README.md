@@ -11,6 +11,7 @@
 ![nVIDIA](https://img.shields.io/badge/cuda-%23000000.svg?style=&logo=nVIDIA&logoColor=green)
 ![Git](https://img.shields.io/badge/git-%23F05033.svg?style=&logo=git&logoColor=white)
 ![Architecture](https://img.shields.io/badge/Architecture-SOLID-blueviolet)
+![Architecture](https://img.shields.io/badge/LICENSE-MIT-lightgreen)
 </div>
 
 ---
