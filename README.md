@@ -239,6 +239,8 @@ During training, `Trainer` emits a `StepMetrics` record for each logging step wi
 
 Perplexity is calculated as `exp(loss)`. With `vocab_size = 8,000`, an initial value of about $4,692$ is consistent with a model that, in the early stages of training, behaves randomly relative to a vocabulary of this size. The average speed measured considering only `train_step()` is about $1.16 s/step$ (median $\approx 1.10 s$, over 97 sampled steps), with `batch_size=16` and `block_size=512`. This value does not include the time spent in `evaluate()`, which with `eval_interval=10` runs every 10 steps, significantly affecting the overall run duration.
 
+That measurement was taken in `float32`, the default at the time. It is worth reading as a memory-bound number rather than a compute-bound one: in `float32` NANO peaks at $4.57$ GiB against the card's $4$ GiB, so part of the working set is paged to host memory over PCIe on every step. Setting `dtype: bfloat16` brings the peak to $3.37$ GiB, inside VRAM, and the same step down to about $394$ ms.
+
 The full log is available at `runs/nano_smoke/train.log`, with the same records in machine-readable form in `runs/nano_smoke/metrics.jsonl`, from which the notebook `notebooks/plot_training_curves.ipynb` generates the charts above. The `runs/` and `notebooks/` directories are not versioned and are generated locally by following the instructions in the [Usage](#usage) section.
 
 The text generated from the final checkpoint, using `--top-p 0.95 --temperature 0.8`, already shows fair sentence-level coherence, in line with the preset's goal, namely verifying that the entire pipeline works correctly, without aiming for model convergence.
@@ -358,8 +360,10 @@ All $E$ routed experts are counted in full. `top_k` only determines how many exp
 Adding all components gives the following closed form:
 
 $$
-\text{total} = \underbrace{V \cdot H}_{\text{embedding}} \;+\; n_{\text{layers}} \cdot \Big[\underbrace{2H}_{\text{block norms}} + \underbrace{2D}_{\text{QK-Norm}} + \underbrace{2HN_hD + 2HN_{kv}D}_{\text{attention projections}} + \underbrace{HE}_{\text{router}} + \underbrace{3HI_eE + 3HI_s}_{\text{experts}}\Big] \;+\; \underbrace{H}_{\text{final norm}}
+\text{total} = \underbrace{V \cdot H}_{\text{embedding}} + n_{\text{layers}} \cdot \Big[\underbrace{2H}_{\text{block norms}} + \underbrace{2D}_{\text{QK-Norm}} + \underbrace{2HN_hD + 2HN_{kv}D}_{\text{attention projections}} + \underbrace{HE}_{\text{router}} + \underbrace{3HI_eE + 3HI_s}_{\text{experts}}\Big] + \underbrace{H}_{\text{final norm}}
 $$
+
+This assumes `tie_embeddings=True`, the default: the LM head shares the embedding matrix, so $V \cdot H$ is counted once and the head contributes nothing of its own. With `tie_embeddings=False` the untied head adds a further $V \cdot H$.
 
 **Worked example: SMALL preset.** For [`configs/small.yml`](configs/small.yml), the relevant values are $V=16{,}000$, $H=512$ from $N_h=8$ and $D=64$, $n_{\text{layers}}=16$, $N_{kv}=4$, $E=8$, $I_e=512$, and $I_s=1{,}376$.
 
@@ -408,8 +412,9 @@ Three `frozen` `dataclass`es defined in [`src/config.py`](src/config.py) describ
 
 | Field | Default | Description |
 | :--- | :---: | :--- |
-| `batch_size` | `16` | Number of sequences processed in each batch |
+| `batch_size` | `16` | Number of sequences per micro-batch, i.e. per forward pass |
 | `block_size` | `512` | Context window length used during training; must be `<= model.max_seq_len` |
+| `grad_accum_steps` | `1` | Micro-batches accumulated into a single optimizer step, making the effective batch `batch_size * grad_accum_steps`. Trades wall-clock time for the peak memory one forward/backward needs, which is what lets a batch too large for VRAM be trained at all. `1` disables accumulation. Note that the MoE load-balancing loss is a product of two batch means and so does not decompose over micro-batches: with accumulation it is computed per micro-batch, over fewer tokens, which makes the routing statistics it measures noisier. No other gradient is affected |
 | `target_tokens` | `400_000_000` | Total token budget, used to determine `max_steps` |
 | `warmup_steps` | `500` | Number of steps dedicated to linear learning-rate warmup |
 | `max_lr` / `min_lr` | `3e-4` / `3e-5` | Maximum and minimum learning rate used by the cosine scheduler |
@@ -424,7 +429,7 @@ Three `frozen` `dataclass`es defined in [`src/config.py`](src/config.py) describ
 | Field | Default | Description |
 | :--- | :---: | :--- |
 | `device` | `cuda` if available, otherwise `cpu` | Device used for training and running the model |
-| `dtype` | `float32` | Precision used for computations; `bfloat16` requires `device=cuda` |
+| `dtype` | `float32` | Precision used for computations; `bfloat16` requires `device=cuda`. Applied through `torch.autocast` in `Trainer._compute_loss`, so it covers both training and validation. No `GradScaler` accompanies it: gradient scaling exists to keep float16 gradients from underflowing, and bfloat16 has float32's exponent range |
 | `adam_betas` | `(0.9, 0.95)` | Beta coefficients used by the AdamW optimizer for the first- and second-moment moving averages |
 | `adam_eps` | `1e-8` | Epsilon term used by AdamW to ensure numerical stability |
 | `log_every` | `10` | Number of steps between successive metric logs in `train.log` and `metrics.jsonl` |
@@ -442,8 +447,11 @@ Three `frozen` `dataclass`es defined in [`src/config.py`](src/config.py) describ
 | `n_experts` / `top_k` | $4$ / $2$ | $8$ / $2$ |
 | `expert_intermediate` / `shared_intermediate` | $256$ / $688$ | $512$ / $1,376$ |
 | `max_seq_len` | $1024$ | $2048$ |
-| `batch_size` / `block_size` | $16$ / $512$ | $8$ / $1024$ |
+| `batch_size` / `block_size` | $16$ / $512$ | $1$ / $1024$ |
+| `grad_accum_steps` &#8594; tokens per optimizer step | $1$ &#8594; $8,192$ | $8$ &#8594; $8,192$ |
 | `target_tokens` &#8594; `max_steps` | $400M$ &#8594; ~$48,828$ | $1.5B$ &#8594; ~$183,105$ |
+
+SMALL splits its batch into 8 micro-batches of one sequence rather than running a single batch of 8. Both consume the same $8,192$ tokens per optimizer step and reach the same `max_steps`, but the split peaks at $3.6$ GiB of VRAM instead of $10.4$, which is what brings the preset within reach of a 4 GB card. It is also faster there, not slower: the undivided batch does not fit, and the driver silently pages the excess to host memory over PCIe.
 
 Both parameter counts are verified by the tests in [`tests/test_config.py`](tests/test_config.py). Since `vocab_size` differs between the two presets, the dataset must be prepared with the corresponding value, as indicated in the [Usage](#usage) section.
 

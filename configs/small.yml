@@ -17,8 +17,11 @@ model:
   tie_embeddings: true
 
 train:
-  batch_size: 8
+  # batch_size 1 x 8 accumulation steps = 8,192 tokens per optimizer step, the
+  # same as a direct batch of 8, but peaking at 3.6 GiB instead of 10.4.
+  batch_size: 1
   block_size: 1024
+  grad_accum_steps: 8
   target_tokens: 1_500_000_000
   warmup_steps: 500
   max_lr: 3.0e-4

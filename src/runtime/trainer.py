@@ -1,4 +1,5 @@
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -56,6 +57,16 @@ class Trainer:
 
         self.schedule = TrainingSchedule(self.model, cfg.train, cfg.runtime)
 
+    def _autocast(self):
+        """Return the autocast context for the configured compute dtype.
+
+        Returns:
+            A context manager to wrap the forward pass in.
+        """
+        if self.cfg.runtime.dtype == "float32":
+            return nullcontext()
+        return torch.autocast(self.device.type, dtype=self.cfg.runtime.torch_dtype)
+
     def _compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run a forward pass and compute the combined training loss.
 
@@ -71,35 +82,49 @@ class Trainer:
             backprop), and ``ce_loss``/``aux_loss`` are returned separately so
             callers can log them individually.
         """
-        out = self.model(x)
-        logits = out.logits
-        ce_loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+        with self._autocast():
+            out = self.model(x)
+            logits = out.logits
+            ce_loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
         return ce_loss + out.aux_loss, ce_loss, out.aux_loss
 
     def train_step(self) -> tuple[float, float]:
         """Run a single training step: forward, backward, then the schedule's step.
 
-        Switches the model to train mode, samples a fresh training batch,
-        computes the combined loss, zeroes the gradients, backpropagates,
-        applies the schedule's gradient clipping plus optimizer update, and
-        advances the internal step counter.
+        Switches the model to train mode, zeroes the gradients, then samples
+        and backpropagates ``cfg.train.grad_accum_steps`` micro-batches whose
+        gradients accumulate into a single update, applies the schedule's
+        gradient clipping plus optimizer update, and advances the internal step
+        counter. With ``grad_accum_steps = 1`` this is one ordinary batch.
+
+        Accumulation exists to decouple the effective batch size from the peak
+        memory of one forward/backward, which is what makes a batch that does
+        not fit in VRAM trainable at all.
 
         Returns:
             tuple[float, float]: A pair ``(loss, ce_loss)``: the combined loss
-            and its cross-entropy component, both as Python floats detached
-            from the autograd graph for cheap logging.
+            and its cross-entropy component, averaged over the accumulated
+            micro-batches, both as Python floats detached from the autograd
+            graph for cheap logging.
         """
         self.model.train()
-        x, y = self.dataset.get_batch(
-            "train", self.cfg.train.batch_size, self.cfg.train.block_size, self.device
-        )
-        loss, ce_loss, aux_loss = self._compute_loss(x, y)
+        accum = self.cfg.train.grad_accum_steps
 
         self.schedule.zero_grad()
-        loss.backward()
+        total_loss = 0.0
+        total_ce_loss = 0.0
+        for _ in range(accum):
+            x, y = self.dataset.get_batch(
+                "train", self.cfg.train.batch_size, self.cfg.train.block_size, self.device
+            )
+            loss, ce_loss, _ = self._compute_loss(x, y)
+            (loss / accum).backward()
+            total_loss += loss.item() / accum
+            total_ce_loss += ce_loss.item() / accum
+
         self.schedule.step(self.model.parameters())
         self.step += 1
-        return loss.item(), ce_loss.item()
+        return total_loss, total_ce_loss
 
     @torch.no_grad()
     def evaluate(self) -> float:

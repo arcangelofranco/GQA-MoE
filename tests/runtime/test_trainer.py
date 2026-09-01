@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -388,3 +389,146 @@ def test_default_recorder_writes_both_files_into_the_run_dir(
     print(f"[default-recorder] train.log exists={(run_dir / 'train.log').exists()} metrics.jsonl exists={(run_dir / 'metrics.jsonl').exists()}")
     assert (run_dir / "train.log").exists()
     assert (run_dir / "metrics.jsonl").exists()
+
+
+_ACCUM_N, _ACCUM_MICRO, _ACCUM_BLOCK, _ACCUM_VOCAB = 4, 2, 16, 50
+
+
+class _FixedBatchDataset:
+    """Dataset stub handing out preset batches in order, then repeating."""
+
+    def __init__(self, batches: list[tuple[torch.Tensor, torch.Tensor]]):
+        """Stores the batches to hand out and the metadata a Trainer reads.
+
+        Args:
+            batches: The `(x, y)` pairs to return, in order.
+        """
+        self._batches = batches
+        self._i = 0
+        self.meta = {"vocab_size": 50, "dtype": "uint16"}
+
+    def get_batch(self, split: str, batch_size: int, block_size: int, device: str):
+        """Returns the next preset batch, ignoring the requested shape.
+
+        Args:
+            split: Ignored; the stub holds one sequence of batches.
+            batch_size: Ignored; the preset batches fix their own shape.
+            block_size: Ignored; likewise.
+            device: Device to move the batch onto.
+
+        Returns:
+            The next `(x, y)` pair, cycling once the list is exhausted.
+        """
+        x, y = self._batches[self._i % len(self._batches)]
+        self._i += 1
+        return x.to(device), y.to(device)
+
+
+def _grads_after_one_step(batches, grad_accum_steps, tmp_path, aux_loss_coeff):
+    """Runs a single Trainer step and returns the resulting gradients by name.
+
+    Args:
+        batches: Batches for the `_FixedBatchDataset` to hand out.
+        grad_accum_steps: Micro-batches to accumulate into the step.
+        tmp_path: Directory for the throwaway run.
+        aux_loss_coeff: Weight of the MoE load-balancing loss.
+
+    Returns:
+        A dict mapping parameter name to its gradient after one step.
+    """
+    base = _tiny_run_config(vocab_size=_ACCUM_VOCAB)
+    train_cfg = TrainConfig(
+        batch_size=_ACCUM_MICRO, block_size=_ACCUM_BLOCK, grad_accum_steps=grad_accum_steps,
+        target_tokens=_ACCUM_MICRO * _ACCUM_BLOCK * grad_accum_steps * 20,
+        warmup_steps=2, max_lr=1e-3, eval_interval=5, eval_iters=2,
+    )
+    cfg = RunConfig(
+        replace(base.model, aux_loss_coeff=aux_loss_coeff), train_cfg, base.runtime
+    )
+    trainer = Trainer(cfg, _FixedBatchDataset(batches), tmp_path / f"run{grad_accum_steps}{aux_loss_coeff}")
+    trainer.train_step()
+    return {n: p.grad.clone() for n, p in trainer.model.named_parameters() if p.grad is not None}
+
+
+def _split_and_whole_batches():
+    """Builds N micro-batches and their concatenation, so both runs see identical tokens.
+
+    Returns:
+        A `(chunks, whole)` pair: the list of micro-batches, and the single
+        batch holding the same rows.
+    """
+    torch.manual_seed(0)
+    chunks = [
+        (torch.randint(0, _ACCUM_VOCAB, (_ACCUM_MICRO, _ACCUM_BLOCK)),
+         torch.randint(0, _ACCUM_VOCAB, (_ACCUM_MICRO, _ACCUM_BLOCK)))
+        for _ in range(_ACCUM_N)
+    ]
+    whole = (torch.cat([x for x, _ in chunks]), torch.cat([y for _, y in chunks]))
+    return chunks, whole
+
+
+def _worst_relative_diff(a: dict, b: dict) -> tuple[str, float]:
+    """Finds the parameter whose gradient differs most between two runs, relative to its scale.
+
+    Args:
+        a: Gradients by parameter name.
+        b: Gradients by parameter name, same keys.
+
+    Returns:
+        The `(name, relative_difference)` of the worst offender.
+    """
+    assert a.keys() == b.keys()
+    diffs = {
+        n: (g - b[n]).abs().max().item() / max(b[n].abs().max().item(), 1e-12)
+        for n, g in a.items()
+    }
+    worst = max(diffs, key=diffs.get)
+    return worst, diffs[worst]
+
+
+def test_gradient_accumulation_matches_the_equivalent_single_batch(tmp_path: Path) -> None:
+    """Checks that N accumulated micro-batches produce the gradient of one N-times-larger batch.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    chunks, whole = _split_and_whole_batches()
+    accumulated = _grads_after_one_step(chunks, _ACCUM_N, tmp_path, aux_loss_coeff=0.0)
+    single = _grads_after_one_step([whole], 1, tmp_path, aux_loss_coeff=0.0)
+
+    name, worst = _worst_relative_diff(accumulated, single)
+    print(f"[grad-accum] params={len(accumulated)} worst={name} relative_diff={worst:.3e}")
+    assert worst < 1e-4
+
+
+def test_moe_aux_loss_is_what_accumulation_changes(tmp_path: Path) -> None:
+    """Pins the one thing accumulation does not preserve: the MoE load-balancing loss.
+
+    Args:
+        tmp_path: Temporary directory provided by pytest.
+    """
+    chunks, whole = _split_and_whole_batches()
+    accumulated = _grads_after_one_step(chunks, _ACCUM_N, tmp_path, aux_loss_coeff=0.01)
+    single = _grads_after_one_step([whole], 1, tmp_path, aux_loss_coeff=0.01)
+
+    name, worst = _worst_relative_diff(accumulated, single)
+    print(f"[grad-accum-aux] worst={name} relative_diff={worst:.3e}")
+    assert worst > 1e-3, "expected the aux loss to make the runs differ"
+    assert "router" in name
+
+
+def test_grad_accum_steps_below_one_is_rejected() -> None:
+    """Checks that a non-positive accumulation count is refused rather than silently skipping the loop."""
+    with pytest.raises(ValueError, match="grad_accum_steps"):
+        TrainConfig(grad_accum_steps=0)
+
+
+def test_tokens_per_step_and_max_steps_account_for_accumulation() -> None:
+    """Checks that splitting a batch into micro-batches leaves the token budget untouched."""
+    direct = TrainConfig(batch_size=8, block_size=1024, target_tokens=1_500_000_000)
+    split = TrainConfig(batch_size=1, block_size=1024, grad_accum_steps=8,
+                        target_tokens=1_500_000_000)
+    print(f"[budget] direct={direct.tokens_per_step}/{direct.max_steps} "
+          f"split={split.tokens_per_step}/{split.max_steps}")
+    assert split.tokens_per_step == direct.tokens_per_step == 8192
+    assert split.max_steps == direct.max_steps

@@ -170,8 +170,9 @@ class TrainConfig(ConfigMixin):
     decay and clipping, the validation cadence, and the seed.
 
     Attributes:
-        batch_size: Number of sequences per batch.
+        batch_size: Number of sequences per micro-batch, i.e. per forward pass.
         block_size: Sequence length (context window) per example.
+        grad_accum_steps: Number of micro-batches accumulated into one optimizer step.
         target_tokens: Total training token budget; derives max_steps.
         warmup_steps: Number of linear LR warmup steps.
         max_lr: Peak learning rate, reached at the end of warmup.
@@ -185,6 +186,7 @@ class TrainConfig(ConfigMixin):
 
     batch_size: int = 16
     block_size: int = 512
+    grad_accum_steps: int = 1
     target_tokens: int = 400_000_000
     warmup_steps: int = 500
     max_lr: float = 3e-4
@@ -196,25 +198,47 @@ class TrainConfig(ConfigMixin):
     seed: int = 1337
 
     @property
+    def tokens_per_step(self) -> int:
+        """Tokens consumed by one optimizer step, across all accumulated micro-batches.
+
+        Returns:
+            int: ``batch_size * block_size * grad_accum_steps``. Splitting a
+            batch into micro-batches changes neither this number nor the
+            token budget it is spent against, only the peak memory needed to
+            get there.
+        """
+        return self.batch_size * self.block_size * self.grad_accum_steps
+
+    @property
     def max_steps(self) -> int:
-        """Total training steps, derived from target_tokens / (batch_size * block_size).
+        """Total optimizer steps, derived from target_tokens / tokens_per_step.
+
+        Counts *optimizer* steps, not forward passes: with accumulation each
+        step consumes ``grad_accum_steps`` micro-batches. Dividing by
+        :attr:`tokens_per_step` is what keeps the declared token budget honest
+        when accumulation is enabled.
 
         Returns:
             int: The number of optimizer steps needed to consume the token
             budget, floored to the nearest integer and clamped to a minimum of
             ``1``.
         """
-        tokens_per_step = self.batch_size * self.block_size
-        return max(1, self.target_tokens // tokens_per_step)
+        return max(1, self.target_tokens // self.tokens_per_step)
 
     def __post_init__(self):
         """Validate the config.
 
         Raises:
-            ValueError: If ``warmup_steps`` is not smaller than the derived
-                ``max_steps``, ``min_lr`` is outside ``(0, max_lr]``, or
-                ``block_size`` is not positive.
+            ValueError: If ``grad_accum_steps`` is not at least ``1``,
+                ``warmup_steps`` is not smaller than the derived ``max_steps``,
+                ``min_lr`` is outside ``(0, max_lr]``, or ``block_size`` is not
+                positive.
         """
+        if self.grad_accum_steps < 1:
+            raise ValueError(
+                f"grad_accum_steps ({self.grad_accum_steps}) must be at least 1: "
+                "1 means no accumulation."
+            )
         if self.warmup_steps >= self.max_steps:
             raise ValueError("warmup_steps must be < max_steps (derived from target_tokens).")
         if not (0 < self.min_lr <= self.max_lr):
@@ -259,6 +283,16 @@ class RuntimeConfig(ConfigMixin):
         """
         if self.dtype == "bfloat16" and self.device == "cpu":
             raise ValueError("bfloat16 requires a CUDA device.")
+
+    @property
+    def torch_dtype(self) -> torch.dtype:
+        """The compute dtype as a torch type, for autocast.
+
+        Returns:
+            torch.dtype: The type named by :attr:`dtype`, e.g.
+            ``torch.bfloat16``.
+        """
+        return getattr(torch, self.dtype)
 
     @classmethod
     def from_dict(cls, d: dict) -> "RuntimeConfig":
@@ -419,7 +453,8 @@ def _small(vocab_size: int = 16000) -> RunConfig:
             expert_intermediate=512, shared_intermediate=1376, n_experts=8, top_k=2,
             max_seq_len=2048,
         ),
-        TrainConfig(batch_size=8, block_size=1024, target_tokens=1_500_000_000),
+        TrainConfig(batch_size=1, block_size=1024, grad_accum_steps=8,
+                    target_tokens=1_500_000_000),
         RuntimeConfig(),
     )
 
