@@ -1,0 +1,14 @@
+.vscode/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+runs/*
+!runs/.gitkeep
+
+notebooks/*
+
+data/*
+!data/.gitkeep
+
+*.drawio

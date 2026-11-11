@@ -1,0 +1,19 @@
+# Same NANO architecture,
+# with a reduced token budget: this is only meant to verify that the entire
+# pipeline works end-to-end and that the model starts generating minimally
+# sensible text, not to reach convergence.
+
+model:
+  vocab_size: 8000
+  # Remaining fields = NANO defaults (n_layers 12, hidden_dim 256, n_experts 4, ...)
+
+train:
+  batch_size: 16
+  block_size: 512
+  target_tokens: 8_000_000   # ~976 steps
+  warmup_steps: 50           # proportional to ~976 steps
+  eval_interval: 10          # = log_every: one validation point per training point, for comparable curves
+  eval_iters: 10             # reduced to avoid spending too much time on evaluation
+
+runtime:
+  checkpoint_every: 200       # more frequent than the default (1000)
